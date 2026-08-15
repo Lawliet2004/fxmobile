@@ -1,0 +1,10 @@
+Robert Bristow-Johnson Audio EQ Cookbook
+========================================
+
+Filter coefficient formulas used by FxMobile's biquad implementation are
+derived from "Cookbook formulae for audio equalizer biquad filter
+coefficients" by Robert Bristow-Johnson.
+
+The cookbook is widely treated as freely reusable public-domain DSP
+reference material. No cookbook source files are vendored in this tree;
+only the published mathematical formulas were reimplemented.

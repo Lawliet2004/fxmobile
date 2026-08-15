@@ -1,0 +1,8 @@
+GNU AFFERO GENERAL PUBLIC LICENSE
+Version 3, 19 November 2007
+
+FxMobile is licensed under the GNU Affero General Public License v3.0.
+The complete license text is in /LICENSE at the repository root.
+
+This file exists so the LICENSES/ directory required by the project spec
+contains an explicit AGPL pointer next to third-party notices.

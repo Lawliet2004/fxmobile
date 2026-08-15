@@ -1,0 +1,21 @@
+[package]
+name = "fxengine"
+version = "1.0.0"
+edition = "2021"
+description = "Real-time FxMobile DSP engine (no UI, no Android deps)"
+license = "AGPL-3.0-only"
+publish = false
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+name = "fxengine"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+strip = true
+
+[profile.release.package."*"]
+opt-level = 3
