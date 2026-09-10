@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ backup / device-transfer rules. Both cloud backup and
+  device-to-device transfer are disabled for the sensitive
+  SharedPreferences that hold custom presets and the last media URI.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="fxsound_presets.xml" />
+        <exclude domain="sharedpref" path="fxsound_settings.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="fxsound_presets.xml" />
+        <exclude domain="sharedpref" path="fxsound_settings.xml" />
+    </device-transfer>
+</data-extraction-rules>

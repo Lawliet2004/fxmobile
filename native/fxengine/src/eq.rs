@@ -35,6 +35,11 @@ impl Equalizer {
         for b in self.bands.iter_mut() {
             b.set_sample_rate(self.sample_rate);
         }
+        // Reapply current parameter snapshot so the biquad coefficients
+        // reflect the new sample rate, then reset states (filter history is
+        // stale at the new rate).
+        self.recompute_all_coefficients();
+        self.reset_states();
     }
 
     pub fn set_enabled(&mut self, on: bool) {
@@ -50,12 +55,32 @@ impl Equalizer {
     }
 
     pub fn setup_bands(&mut self, count: usize) {
-        let freqs = band_freqs(count);
+        // Clamp to a known standard and emit a warning for unknown counts.
+        // - 1..=4 -> 5-band centers
+        // - 6..=8 -> 9-band
+        // - everything else -> use the requested count if standard, else 10-band default
+        let effective = if (1..=4).contains(&count) {
+            eprintln!("fxengine: eq band count {count} not standard, clamping to 5");
+            5
+        } else if (6..=8).contains(&count) {
+            eprintln!("fxengine: eq band count {count} not standard, clamping to 9");
+            9
+        } else if matches!(count, 5 | 9 | 10 | 15 | 20 | 31) {
+            count
+        } else {
+            eprintln!("fxengine: eq band count {count} not standard, using 10");
+            10
+        };
+
+        let freqs = band_freqs(effective);
         let n = freqs.len().min(MAX_BANDS);
+        let prev_active = self.active;
+        let prev_gains = self.gains; // copy out before any re-zeroing
+
         self.active = n;
-        let q = if count >= 20 {
+        let q = if effective >= 20 {
             2.8
-        } else if count == 5 {
+        } else if effective == 5 {
             1.0
         } else {
             1.414
@@ -68,11 +93,13 @@ impl Equalizer {
             } else {
                 FilterType::Peaking
             };
+            // Preserve prior gains for indices that exist in both old and new
+            // layouts (when the user re-arranges from e.g. 5 -> 10 bands).
+            self.gains[i] = if i < prev_active { prev_gains[i] } else { 0.0 };
             self.freqs[i] = freqs[i];
-            self.gains[i] = 0.0;
             self.qs[i] = q;
             self.bands[i].set_sample_rate(self.sample_rate);
-            self.bands[i].configure(kind, freqs[i], 0.0, q);
+            self.bands[i].configure(kind, freqs[i], self.gains[i], q);
             self.bands[i].reset();
         }
     }
@@ -80,22 +107,23 @@ impl Equalizer {
     pub fn set_gain(&mut self, i: usize, db: f32) {
         if i < self.active {
             let g = db.clamp(-12.0, 12.0);
+            // Update only the snapshot fields. The audio callback will read
+            // them on its next block and recompute coefficients, so there is
+            // no race with the audio thread even when this is called from
+            // the UI thread.
             self.gains[i] = g;
-            self.bands[i].set_gain_db(g);
         }
     }
 
     pub fn set_freq(&mut self, i: usize, f: f32) {
         if i < self.active {
             self.freqs[i] = f;
-            self.bands[i].set_frequency(f);
         }
     }
 
     pub fn set_q(&mut self, i: usize, q: f32) {
         if i < self.active {
             self.qs[i] = q;
-            self.bands[i].set_q(q);
         }
     }
 
@@ -139,7 +167,19 @@ impl Equalizer {
         if !self.enabled {
             return;
         }
+        // Recompute-once-per-block: read the latest gain/freq/q snapshot
+        // from the (UI-thread-updated) arrays and update the biquad
+        // coefficients. The biquad state itself (z1/z2) is owned by the
+        // audio thread and only touched here.
         for i in 0..self.active {
+            let kind = if i == 0 {
+                FilterType::LowShelf
+            } else if i + 1 == self.active {
+                FilterType::HighShelf
+            } else {
+                FilterType::Peaking
+            };
+            self.bands[i].configure(kind, self.freqs[i], self.gains[i], self.qs[i]);
             self.bands[i].process_stereo(left, right);
         }
     }
@@ -150,9 +190,33 @@ impl Equalizer {
         }
         let mut total = 0.0;
         for i in 0..self.active {
-            total += self.bands[i].magnitude_db(freq);
+            let kind = if i == 0 {
+                FilterType::LowShelf
+            } else if i + 1 == self.active {
+                FilterType::HighShelf
+            } else {
+                FilterType::Peaking
+            };
+            total += self
+                .bands[i]
+                .magnitude_db_for(kind, self.freqs[i], self.gains[i], self.qs[i], freq);
         }
         total
+    }
+
+    /// Re-apply all current gain/freq/q snapshots to the underlying biquads
+    /// without resetting state. Used after a sample-rate change.
+    fn recompute_all_coefficients(&mut self) {
+        for i in 0..self.active {
+            let kind = if i == 0 {
+                FilterType::LowShelf
+            } else if i + 1 == self.active {
+                FilterType::HighShelf
+            } else {
+                FilterType::Peaking
+            };
+            self.bands[i].configure(kind, self.freqs[i], self.gains[i], self.qs[i]);
+        }
     }
 }
 

@@ -1,5 +1,6 @@
 use crate::biquad::{Biquad, FilterType};
 use crate::smoother::Smoother;
+use std::collections::VecDeque;
 
 pub struct DcBlocker {
     r: f32,
@@ -25,6 +26,8 @@ impl DcBlocker {
     pub fn set_sample_rate(&mut self, sr: f32) {
         let sr = if sr > 0.0 { sr } else { 48_000.0 };
         self.r = (1.0 - (2.0 * std::f32::consts::PI * 20.0 / sr)).clamp(0.90, 0.9999);
+        // Filter state is no longer valid at the new sample rate.
+        self.reset();
     }
 
     pub fn reset(&mut self) {
@@ -438,6 +441,15 @@ pub struct Limiter {
     release: f32,
     envelope: f32,
     clipped: bool,
+    /// Per-channel lookahead delay lines, in sample order. The head is the
+    /// oldest sample and the tail is the most recent. Length is fixed at
+    /// `lookahead_samples`.
+    lookahead_l: VecDeque<f32>,
+    lookahead_r: VecDeque<f32>,
+    /// Number of samples of lookahead in use (0 means bypassed).
+    lookahead_samples: usize,
+    /// 2 ms of lookahead by default. Will be clamped to a sane upper bound.
+    lookahead_ms: f32,
 }
 
 impl Limiter {
@@ -448,6 +460,10 @@ impl Limiter {
             release: 0.0,
             envelope: 0.0,
             clipped: false,
+            lookahead_l: VecDeque::new(),
+            lookahead_r: VecDeque::new(),
+            lookahead_samples: 0,
+            lookahead_ms: 2.0,
         };
         s.set_sample_rate(sr);
         s
@@ -457,11 +473,23 @@ impl Limiter {
         let sr = if sr > 0.0 { sr } else { 48_000.0 };
         self.attack = (-1.0 / (0.0002 * sr)).exp();
         self.release = (-1.0 / (0.045 * sr)).exp();
+        // 2 ms of lookahead, clamped to [1, 192] samples.
+        let desired = (self.lookahead_ms * sr / 1000.0).round() as usize;
+        let max_samples = 192usize;
+        self.lookahead_samples = desired.clamp(1, max_samples);
+        self.lookahead_l = VecDeque::from(vec![0.0f32; self.lookahead_samples]);
+        self.lookahead_r = VecDeque::from(vec![0.0f32; self.lookahead_samples]);
     }
 
     pub fn reset(&mut self) {
         self.envelope = 0.0;
         self.clipped = false;
+        for s in self.lookahead_l.iter_mut() {
+            *s = 0.0;
+        }
+        for s in self.lookahead_r.iter_mut() {
+            *s = 0.0;
+        }
     }
 
     pub fn take_clip(&mut self) -> bool {
@@ -471,20 +499,51 @@ impl Limiter {
     }
 
     pub fn process(&mut self, left: &mut [f32], right: &mut [f32]) {
-        for i in 0..left.len().min(right.len()) {
-            let peak = left[i].abs().max(right[i].abs());
-            self.envelope = if peak > self.envelope {
-                peak + self.attack * (self.envelope - peak)
+        let n = left.len().min(right.len());
+        let la = self.lookahead_samples;
+        for i in 0..n {
+            // Push the new sample into the lookahead buffer (tail = newest).
+            self.lookahead_l.push_back(left[i]);
+            self.lookahead_r.push_back(right[i]);
+            if self.lookahead_l.len() > la {
+                self.lookahead_l.pop_front();
+            }
+            if self.lookahead_r.len() > la {
+                self.lookahead_r.pop_front();
+            }
+
+            // Find the peak over the entire lookahead window. This is what
+            // determines the gain we apply to the sample at the head of the
+            // buffer — i.e. the sample that emerged `lookahead_samples` ago.
+            let mut window_peak = 0.0f32;
+            for &s in self.lookahead_l.iter() {
+                let a = s.abs();
+                if a > window_peak {
+                    window_peak = a;
+                }
+            }
+            for &s in self.lookahead_r.iter() {
+                let a = s.abs();
+                if a > window_peak {
+                    window_peak = a;
+                }
+            }
+            // Update the envelope toward the window peak.
+            self.envelope = if window_peak > self.envelope {
+                window_peak + self.attack * (self.envelope - window_peak)
             } else {
-                peak + self.release * (self.envelope - peak)
+                window_peak + self.release * (self.envelope - window_peak)
             };
+
             let mut gain = 1.0;
             if self.envelope > self.threshold {
                 gain = self.threshold / self.envelope;
                 self.clipped = true;
             }
-            let mut out_l = left[i] * gain;
-            let mut out_r = right[i] * gain;
+
+            // Apply gain to the sample at the head of the delay line.
+            let mut out_l = self.lookahead_l[0] * gain;
+            let mut out_r = self.lookahead_r[0] * gain;
             if out_l.abs() > self.threshold {
                 out_l = soft_clip(out_l);
             }

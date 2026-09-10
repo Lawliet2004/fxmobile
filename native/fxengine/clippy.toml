@@ -1,0 +1,16 @@
+# clippy configuration for fxengine.
+#
+# The crate is a real-time audio DSP library: it must never panic in the
+# audio callback, and the FFI boundary must always be reachable. As a
+# result we forbid the two most common panic sources: `unwrap` and
+# `expect`. Use pattern matching or `if let` instead.
+#
+# Tests under `#[cfg(test)]` and `tests/` may need to assert on
+# invariants; we allow `expect` in those contexts (see lib.rs `mod tests`
+# which uses `expect` for setup/lookup and `assert!` for assertions).
+disallowed-methods = [
+    { path = "std::option::Option::unwrap", reason = "use pattern matching or `if let` to avoid panic in the audio callback" },
+    { path = "std::result::Result::unwrap", reason = "use `?`, `match`, or `if let` to avoid panic in the audio callback" },
+    { path = "std::option::Option::expect", reason = "use pattern matching or `if let`; the message would be cold comfort in the audio callback" },
+    { path = "std::result::Result::expect", reason = "use `?`, `match`, or `if let`; the message would be cold comfort in the audio callback" },
+]

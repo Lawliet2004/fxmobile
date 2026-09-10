@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <cstdint>
 #include <memory>
 #include "dsp/DspEngine.hpp"
 #include "audio/OboeAudioStream.hpp"
@@ -6,12 +7,18 @@
 
 using namespace fxmobile;
 
+static jlong toJLong(const void* p) {
+    return static_cast<jlong>(reinterpret_cast<uintptr_t>(p));
+}
+
 static DspEngine* engineOf(jlong ptr) {
-    return reinterpret_cast<DspEngine*>(ptr);
+    if (ptr == 0) return nullptr;
+    return reinterpret_cast<DspEngine*>(static_cast<uintptr_t>(ptr));
 }
 
 static OboeAudioStream* streamOf(jlong ptr) {
-    return reinterpret_cast<OboeAudioStream*>(ptr);
+    if (ptr == 0) return nullptr;
+    return reinterpret_cast<OboeAudioStream*>(static_cast<uintptr_t>(ptr));
 }
 
 extern "C" {
@@ -20,7 +27,7 @@ JNIEXPORT jlong JNICALL
 Java_com_fxsound_mobile_audio_NativeDspBridge_createEngine(
         JNIEnv* env, jobject /* this */, jfloat sampleRate, jint maxBlockSize) {
     auto* engine = new DspEngine(sampleRate, static_cast<size_t>(maxBlockSize));
-    return reinterpret_cast<jlong>(engine);
+    return toJLong(engine);
 }
 
 JNIEXPORT void JNICALL
@@ -123,13 +130,19 @@ JNIEXPORT void JNICALL
 Java_com_fxsound_mobile_audio_NativeDspBridge_getMagnitudeResponse(
         JNIEnv* env, jobject /* this */, jlong enginePtr, jfloatArray inFreqs, jfloatArray outDbs, jint count) {
     auto* engine = engineOf(enginePtr);
-    if (!engine || count <= 0) return;
+    if (!engine || count <= 0 || !inFreqs || !outDbs) return;
+    const jsize inLen = env->GetArrayLength(inFreqs);
+    const jsize outLen = env->GetArrayLength(outDbs);
+    jint n = count;
+    if (n > inLen) n = inLen;
+    if (n > outLen) n = outLen;
+    if (n <= 0) return;
 
     jfloat* freqs = env->GetFloatArrayElements(inFreqs, nullptr);
     jfloat* dbs = env->GetFloatArrayElements(outDbs, nullptr);
 
     if (freqs && dbs) {
-        for (int i = 0; i < count; ++i) {
+        for (int i = 0; i < n; ++i) {
             dbs[i] = engine->getCompositeMagnitudeResponseDb(freqs[i]);
         }
     }
@@ -142,7 +155,8 @@ JNIEXPORT void JNICALL
 Java_com_fxsound_mobile_audio_NativeDspBridge_getMeterData(
         JNIEnv* env, jobject /* this */, jlong enginePtr, jfloatArray outValues) {
     auto* engine = engineOf(enginePtr);
-    if (!engine) return;
+    if (!engine || !outValues) return;
+    if (env->GetArrayLength(outValues) < 5) return;
 
     jfloat* values = env->GetFloatArrayElements(outValues, nullptr);
     if (values) {
@@ -166,10 +180,28 @@ Java_com_fxsound_mobile_audio_NativeDspBridge_createAudioStream(
     auto* engine = engineOf(enginePtr);
     if (!engine) return 0;
 
-    // Aliased shared_ptr: stream must not free the engine (JNI owns it).
-    std::shared_ptr<DspEngine> engineShared(std::shared_ptr<DspEngine>{}, engine);
+    // Lifecycle contract:
+    //   - The Java/Native DspBridge creates and owns the DspEngine. JNI is
+    //     the sole owner; the engine is freed in destroyEngine().
+    //   - The OboeAudioStream holds a non-owning alias of the engine so it
+    //     can keep the engine alive while the stream is alive. We construct
+    //     a shared_ptr with a no-op custom deleter that performs NO delete,
+    //     because the JNI side still owns the underlying object.
+    //   - Therefore: the engine MUST outlive the stream; the stream MUST
+    //     outlive any in-flight audio callbacks (Oboe stops the callback
+    //     thread in OboeAudioStream::stop() / the destructor, so by the
+    //     time Java destroys the engine, the stream is already gone).
+    //   - The Dart/Java side must call destroyAudioStream() before
+    //     destroyEngine(). The existing Java code does this in
+    //     NativeDspBridge.release(); do not change that ordering.
+    std::shared_ptr<DspEngine> engineShared(engine, [](DspEngine* /*p*/) {
+        // Intentionally empty: JNI owns the DspEngine and is responsible
+        // for calling delete on it. The stream just keeps a strong ref so
+        // that the engine cannot be destroyed out from under the audio
+        // callback while the stream is still alive.
+    });
     auto* stream = new OboeAudioStream(engineShared);
-    return reinterpret_cast<jlong>(stream);
+    return toJLong(stream);
 }
 
 JNIEXPORT void JNICALL
@@ -259,7 +291,8 @@ JNIEXPORT void JNICALL
 Java_com_fxsound_mobile_audio_NativeDspBridge_getAudioStreamTelemetry(
         JNIEnv* env, jobject /* this */, jlong streamPtr, jfloatArray outTelemetry) {
     auto* stream = streamOf(streamPtr);
-    if (!stream) return;
+    if (!stream || !outTelemetry) return;
+    if (env->GetArrayLength(outTelemetry) < 6) return;
 
     jfloat* telemetry = env->GetFloatArrayElements(outTelemetry, nullptr);
     if (telemetry) {

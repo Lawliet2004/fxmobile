@@ -4,9 +4,14 @@ import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -19,6 +24,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -36,6 +42,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -43,12 +52,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.fxsound.mobile.R
@@ -59,23 +71,30 @@ import com.fxsound.mobile.core.presets.PresetCompare
 import com.fxsound.mobile.core.presets.PresetRepository
 import com.fxsound.mobile.core.runtime.ProcessingStatusResolver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.fxsound.mobile.ui.components.FxFrequencyCurve
 import com.fxsound.mobile.ui.components.FxLevelMeter
 import com.fxsound.mobile.ui.components.FxPowerButton
 import com.fxsound.mobile.ui.components.FxSlider
-import com.fxsound.mobile.ui.theme.FxAccentCoral
-import com.fxsound.mobile.ui.theme.FxAccentCoralGlow
+import com.fxsound.mobile.ui.theme.FxAccent
 import com.fxsound.mobile.ui.theme.FxBgDark
 import com.fxsound.mobile.ui.theme.FxBorder
 import com.fxsound.mobile.ui.theme.FxCardElevated
 import com.fxsound.mobile.ui.theme.FxCardSurface
-import com.fxsound.mobile.ui.theme.FxCyan
+import com.fxsound.mobile.ui.theme.FxCurveFill
+import com.fxsound.mobile.ui.theme.FxDanger
+import com.fxsound.mobile.ui.theme.FxInvert
+import com.fxsound.mobile.ui.theme.FxMotion
+import com.fxsound.mobile.ui.theme.FxOnInvert
 import com.fxsound.mobile.ui.theme.FxTextMuted
 import com.fxsound.mobile.ui.theme.FxTextPrimary
 import com.fxsound.mobile.ui.theme.FxTextSecondary
 import com.fxsound.mobile.ui.theme.FxTrackInactive
+import com.fxsound.mobile.ui.theme.reduceMotion
+import com.fxsound.mobile.ui.util.UiPacking
 import com.fxsound.mobile.ui.util.collectMappedAsState
+import com.fxsound.mobile.ui.util.fxClickable
 import kotlin.math.log10
 import kotlin.math.pow
 
@@ -86,45 +105,89 @@ fun HomeScreen(
     onNavigateToEqualizer: () -> Unit,
     modifier: Modifier = Modifier
 ) {
+    val snackbarHostState = remember { SnackbarHostState() }
+    val snackbarScope = rememberCoroutineScope()
+    val lastError by audioController.telemetry.collectMappedAsState { it.lastError }
+    val fileOpenedMessage = stringResource(R.string.file_opened)
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
-        if (uri != null) audioController.openAudioFile(uri)
+        if (uri != null) {
+            audioController.openAudioFile(uri)
+            snackbarScope.launch { snackbarHostState.showSnackbar(fileOpenedMessage) }
+        }
     }
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(FxBgDark)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 12.dp)
-    ) {
-        HomeHeader(audioController)
-        Spacer(modifier = Modifier.height(8.dp))
-        ProcessingStatusBanner(audioController)
-        Spacer(modifier = Modifier.height(12.dp))
-        NowPlayingCard(
-            audioController = audioController,
-            onOpen = { picker.launch(arrayOf("audio/*")) },
-            onToggle = { audioController.toggleMediaPlayback() },
-            onSeek = { audioController.seekMedia(it) }
-        )
-        Spacer(modifier = Modifier.height(12.dp))
-        PresetChipRow(audioController, presetRepository)
-        Spacer(modifier = Modifier.height(12.dp))
-        EffectSliders(audioController)
-        Spacer(modifier = Modifier.height(12.dp))
-        EqPreviewCard(audioController, onNavigateToEqualizer)
-        Spacer(modifier = Modifier.height(12.dp))
-        OutputSection(audioController)
-        Spacer(modifier = Modifier.height(16.dp))
+    LaunchedEffect(lastError) {
+        val err = lastError
+        if (!err.isNullOrBlank()) {
+            snackbarHostState.showSnackbar(err)
+            audioController.clearError()
+        }
+    }
+
+    Box(modifier = modifier.fillMaxSize().background(FxBgDark)) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(FxBgDark)
+                .verticalScroll(rememberScrollState())
+                .padding(
+                    start = UiPacking.SCREEN_PAD_DP.dp,
+                    end = UiPacking.SCREEN_PAD_DP.dp,
+                    top = 12.dp,
+                    bottom = UiPacking.settingsBottomClearanceDp().dp
+                )
+        ) {
+            HomeHeader(audioController)
+            Spacer(modifier = Modifier.height(8.dp))
+            ProcessingStatusBanner(audioController)
+            Spacer(modifier = Modifier.height(12.dp))
+            NowPlayingCard(
+                audioController = audioController,
+                onOpen = { picker.launch(arrayOf("audio/*")) },
+                onToggle = { audioController.toggleMediaPlayback() },
+                onSeek = { audioController.seekMedia(it) }
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            PresetChipRow(audioController, presetRepository)
+            Spacer(modifier = Modifier.height(12.dp))
+            EffectSliders(audioController)
+            Spacer(modifier = Modifier.height(12.dp))
+            EqPreviewCard(audioController, onNavigateToEqualizer)
+            Spacer(modifier = Modifier.height(12.dp))
+            OutputSection(audioController)
+        }
+
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) { data ->
+            Snackbar(
+                snackbarData = data,
+                containerColor = FxCardSurface,
+                contentColor = FxTextPrimary
+            )
+        }
     }
 }
 
+private data class HeaderTelemetry(
+    val deviceName: String,
+    val isBluetooth: Boolean,
+    val lastError: String?
+)
+
 @Composable
 private fun HomeHeader(audioController: AudioEngineController) {
+    // One subscription for the whole header slice. The data-class payload keeps
+    // distinctUntilChanged cheap so only meaningful changes recompose this scope.
+    val header by audioController.telemetry.collectMappedAsState {
+        HeaderTelemetry(
+            deviceName = it.activeOutputDevice,
+            isBluetooth = it.isBluetooth,
+            lastError = it.lastError
+        )
+    }
     val powerEnabled by audioController.parameters.collectMappedAsState { it.powerEnabled }
-    val deviceName by audioController.telemetry.collectMappedAsState { it.activeOutputDevice }
-    val isBluetooth by audioController.telemetry.collectMappedAsState { it.isBluetooth }
-    val lastError by audioController.telemetry.collectMappedAsState { it.lastError }
 
     Column {
         Row(
@@ -139,17 +202,18 @@ private fun HomeHeader(audioController: AudioEngineController) {
             Icon(
                 imageVector = Icons.Default.Headphones,
                 contentDescription = stringResource(R.string.audio_output),
-                tint = if (isBluetooth) FxCyan else FxAccentCoral,
+                tint = if (header.isBluetooth) FxTextSecondary else FxTextPrimary,
                 modifier = Modifier.size(18.dp)
             )
             Spacer(modifier = Modifier.width(8.dp))
             Text(
-                text = deviceName,
+                text = header.deviceName,
                 color = FxTextPrimary,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Medium,
                 modifier = Modifier.weight(1f),
-                maxLines = 1
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             FxPowerButton(
                 enabled = powerEnabled,
@@ -157,15 +221,17 @@ private fun HomeHeader(audioController: AudioEngineController) {
                 compact = true
             )
         }
-        lastError?.let { err ->
+        header.lastError?.let { err ->
             Spacer(modifier = Modifier.height(8.dp))
             Text(
                 text = err,
-                color = FxAccentCoral,
+                color = FxAccent,
                 fontSize = 12.sp,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable { audioController.clearError() }
+                    .fxClickable { audioController.clearError() },
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
             )
         }
     }
@@ -179,81 +245,105 @@ private fun PresetChipRow(
     val presets by presetRepository.presets.collectMappedAsState { it }
     val activePreset by presetRepository.activePreset.collectMappedAsState { it }
     val params by audioController.parameters.collectMappedAsState { it }
-    val modified = presetRepository.isModified(activePreset, params)
     var comparing by remember { mutableStateOf(false) }
+    val modified = !comparing && presetRepository.isModified(activePreset, params)
 
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(UiPacking.CHIP_GAP_DP.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         presets.forEach { preset ->
             val isSelected = activePreset.id == preset.id
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(if (isSelected) FxAccentCoral else FxCardSurface)
-                    .border(1.dp, if (isSelected) FxAccentCoral else FxBorder, RoundedCornerShape(16.dp))
-                    .clickable {
-                        comparing = false
-                        presetRepository.selectPreset(preset)
-                        audioController.applyPreset(preset)
-                    }
-                    .padding(horizontal = 14.dp, vertical = 8.dp)
-            ) {
-                Text(
-                    text = if (isSelected && modified) "${preset.name}*" else preset.name,
-                    color = if (isSelected) FxTextPrimary else FxTextSecondary,
-                    fontSize = 12.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
-                )
-            }
+            val chipLabel = if (isSelected && modified) "${preset.name}*" else preset.name
+            PresetChip(
+                label = chipLabel,
+                selected = isSelected,
+                onClick = {
+                    comparing = false
+                    presetRepository.selectPreset(preset)
+                    audioController.applyPreset(preset)
+                }
+            )
         }
 
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(FxCardElevated)
-                .border(1.dp, FxBorder, RoundedCornerShape(16.dp))
-                .clickable {
-                    comparing = false
-                    presetRepository.selectPreset(BuiltInPresets.FLAT)
-                    audioController.applyPreset(BuiltInPresets.FLAT)
-                }
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+        PresetChip(
+            label = "Flat",
+            selected = false,
+            onClick = {
+                comparing = false
+                presetRepository.selectPreset(BuiltInPresets.DEFAULT)
+                audioController.applyPreset(BuiltInPresets.DEFAULT)
+            },
+            unselectedContainer = FxCardElevated,
+            leading = {
                 Icon(
                     imageVector = Icons.Default.RestartAlt,
                     contentDescription = stringResource(R.string.reset_to_flat),
                     tint = FxTextSecondary,
                     modifier = Modifier.size(14.dp)
                 )
-                Spacer(modifier = Modifier.width(4.dp))
-                Text(text = "Flat", color = FxTextSecondary, fontSize = 12.sp)
             }
+        )
+        PresetChip(
+            label = if (comparing) stringResource(R.string.compare_on) else stringResource(R.string.compare_preset),
+            selected = comparing,
+            onClick = {
+                comparing = !comparing
+                audioController.applyPreset(PresetCompare.target(comparing, activePreset))
+            },
+            selectedContainer = FxTextSecondary,
+            unselectedContainer = FxCardElevated,
+            selectedContent = FxOnInvert
+        )
+    }
+}
+
+@Composable
+private fun PresetChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    selectedContainer: Color = FxInvert,
+    selectedContent: Color = FxOnInvert,
+    unselectedContainer: Color = FxCardSurface,
+    leading: @Composable (() -> Unit)? = null
+) {
+    val reduced = reduceMotion()
+    val container by androidx.compose.animation.animateColorAsState(
+        targetValue = if (selected) selectedContainer else unselectedContainer,
+        animationSpec = FxMotion.colorSpec(reduced),
+        label = "chipContainer"
+    )
+    val content by androidx.compose.animation.animateColorAsState(
+        targetValue = if (selected) selectedContent else FxTextSecondary,
+        animationSpec = FxMotion.colorSpec(reduced),
+        label = "chipContent"
+    )
+    Row(
+        modifier = Modifier
+            .wrapContentWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(container)
+            .border(1.dp, if (selected) selectedContainer else FxBorder, RoundedCornerShape(16.dp))
+            .fxClickable(onClick = onClick)
+            .padding(horizontal = UiPacking.CHIP_PAD_H_DP.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (leading != null) {
+            leading()
+            Spacer(modifier = Modifier.width(4.dp))
         }
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(16.dp))
-                .background(if (comparing) FxCyan else FxCardElevated)
-                .border(1.dp, if (comparing) FxCyan else FxBorder, RoundedCornerShape(16.dp))
-                .clickable {
-                    comparing = !comparing
-                    audioController.applyPreset(PresetCompare.target(comparing, activePreset))
-                }
-                .padding(horizontal = 12.dp, vertical = 8.dp)
-        ) {
-            Text(
-                text = if (comparing) stringResource(R.string.compare_on) else stringResource(R.string.compare_preset),
-                color = FxTextPrimary,
-                fontSize = 12.sp,
-                fontWeight = if (comparing) FontWeight.Bold else FontWeight.Normal
-            )
-        }
-        Spacer(modifier = Modifier.width(4.dp))
+        Text(
+            text = label,
+            color = content,
+            fontSize = UiPacking.CHIP_FONT_SP.sp,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                softWrap = false,
+                overflow = TextOverflow.Visible
+        )
     }
 }
 
@@ -267,7 +357,7 @@ private fun ProcessingStatusBanner(audioController: AudioEngineController) {
     val message = ProcessingStatusResolver.message(status, sessionLabel)
     Text(
         text = message,
-        color = if (mode == ProcessingMode.PLAYER_SESSION && !sessionAttached) FxAccentCoral else FxTextSecondary,
+        color = if (mode == ProcessingMode.PLAYER_SESSION && !sessionAttached) FxDanger else FxTextSecondary,
         fontSize = 12.sp,
         lineHeight = 16.sp,
         modifier = Modifier
@@ -281,34 +371,58 @@ private fun ProcessingStatusBanner(audioController: AudioEngineController) {
 
 @Composable
 private fun EffectSliders(audioController: AudioEngineController) {
-    val clarity by audioController.parameters.collectMappedAsState { it.clarity }
-    val bass by audioController.parameters.collectMappedAsState { it.bass }
-    val ambience by audioController.parameters.collectMappedAsState { it.ambience }
-    val surround by audioController.parameters.collectMappedAsState { it.surround }
-    val dynamicBoost by audioController.parameters.collectMappedAsState { it.dynamicBoost }
-
+    // Card chrome lives in the parent; each child re-collects only its own DSP slice.
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(FxCardSurface)
-            .border(1.dp, FxBorder, RoundedCornerShape(14.dp))
+            .border(1.dp, FxBorder, RoundedCornerShape(16.dp))
             .padding(horizontal = 16.dp, vertical = 12.dp)
     ) {
         Text(
-            text = stringResource(R.string.enhancement_effects).uppercase(),
-            color = FxTextMuted,
-            fontSize = 11.sp,
-            fontWeight = FontWeight.Bold,
-            letterSpacing = 1.2.sp
+            text = stringResource(R.string.enhancement_effects),
+            color = FxTextSecondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Normal
         )
         Spacer(modifier = Modifier.height(6.dp))
-        FxSlider(label = stringResource(R.string.clarity), value = clarity, onValueChange = { audioController.setClarity(it) })
-        FxSlider(label = stringResource(R.string.bass_boost), value = bass, onValueChange = { audioController.setBass(it) })
-        FxSlider(label = stringResource(R.string.ambience), value = ambience, onValueChange = { audioController.setAmbience(it) })
-        FxSlider(label = stringResource(R.string.surround), value = surround, onValueChange = { audioController.setSurround(it) })
-        FxSlider(label = stringResource(R.string.dynamic_boost), value = dynamicBoost, onValueChange = { audioController.setDynamicBoost(it) })
+        ClaritySlider(audioController)
+        BassSlider(audioController)
+        AmbienceSlider(audioController)
+        SurroundSlider(audioController)
+        DynamicBoostSlider(audioController)
     }
+}
+
+@Composable
+private fun ClaritySlider(audioController: AudioEngineController) {
+    val v by audioController.parameters.collectMappedAsState { it.clarity }
+    FxSlider(label = stringResource(R.string.clarity), value = v, onValueChange = { audioController.setClarity(it) })
+}
+
+@Composable
+private fun BassSlider(audioController: AudioEngineController) {
+    val v by audioController.parameters.collectMappedAsState { it.bass }
+    FxSlider(label = stringResource(R.string.bass_boost), value = v, onValueChange = { audioController.setBass(it) })
+}
+
+@Composable
+private fun AmbienceSlider(audioController: AudioEngineController) {
+    val v by audioController.parameters.collectMappedAsState { it.ambience }
+    FxSlider(label = stringResource(R.string.ambience), value = v, onValueChange = { audioController.setAmbience(it) })
+}
+
+@Composable
+private fun SurroundSlider(audioController: AudioEngineController) {
+    val v by audioController.parameters.collectMappedAsState { it.surround }
+    FxSlider(label = stringResource(R.string.surround), value = v, onValueChange = { audioController.setSurround(it) })
+}
+
+@Composable
+private fun DynamicBoostSlider(audioController: AudioEngineController) {
+    val v by audioController.parameters.collectMappedAsState { it.dynamicBoost }
+    FxSlider(label = stringResource(R.string.dynamic_boost), value = v, onValueChange = { audioController.setDynamicBoost(it) })
 }
 
 @Composable
@@ -319,7 +433,6 @@ private fun EqPreviewCard(
     val eqEnabled by audioController.parameters.collectMappedAsState { it.eqEnabled }
     val eqGains by audioController.parameters.collectMappedAsState { it.eqGains }
     val eqFrequencies by audioController.parameters.collectMappedAsState { it.eqFrequencies }
-    val eqQFactors by audioController.parameters.collectMappedAsState { it.eqQFactors }
     val curveFreqs = remember {
         FloatArray(16) { i ->
             val t = i / 15f
@@ -327,7 +440,7 @@ private fun EqPreviewCard(
         }
     }
     var curveDbs by remember { mutableStateOf(List(16) { 0f }) }
-    LaunchedEffect(eqGains, eqFrequencies, eqQFactors, eqEnabled) {
+    LaunchedEffect(eqGains, eqFrequencies, eqEnabled) {
         kotlinx.coroutines.delay(50)
         curveDbs = withContext(Dispatchers.Default) {
             audioController.computeMagnitudeResponse(curveFreqs)
@@ -337,38 +450,44 @@ private fun EqPreviewCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(FxCardSurface)
-            .border(1.dp, FxBorder, RoundedCornerShape(14.dp))
-            .clickable { onNavigateToEqualizer() }
+            .border(1.dp, FxBorder, RoundedCornerShape(16.dp))
+            .fxClickable(onClick = onNavigateToEqualizer)
             .padding(14.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Icon(
                     imageVector = Icons.Default.GraphicEq,
                     contentDescription = stringResource(R.string.equalizer),
-                    tint = FxCyan,
+                    tint = FxTextSecondary,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = stringResource(R.string.equalizer).uppercase(),
-                    color = FxTextPrimary,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.sp
-                )
+            Text(
+                text = stringResource(R.string.equalizer),
+                color = FxTextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             }
+            Spacer(modifier = Modifier.width(8.dp))
             Text(
                 text = if (eqEnabled) stringResource(R.string.eq_active) else stringResource(R.string.eq_bypass),
-                color = if (eqEnabled) FxCyan else FxTextMuted,
+                color = if (eqEnabled) FxTextSecondary else FxTextMuted,
                 fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
         }
         Spacer(modifier = Modifier.height(8.dp))
@@ -377,8 +496,8 @@ private fun EqPreviewCard(
             bandFrequencies = eqFrequencies,
             responseDbs = curveDbs,
             isInteractive = false,
-            lineColor = FxAccentCoral,
-            fillColor = FxAccentCoralGlow,
+            lineColor = FxTextPrimary,
+            fillColor = FxCurveFill,
             showBandGuides = false,
             sampleCount = 16,
             modifier = Modifier.height(88.dp)
@@ -397,24 +516,25 @@ private fun OutputSection(audioController: AudioEngineController) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(FxCardSurface)
-            .border(1.dp, FxBorder, RoundedCornerShape(14.dp))
+            .border(1.dp, FxBorder, RoundedCornerShape(16.dp))
             .padding(horizontal = 16.dp, vertical = 10.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clickable { expanded = !expanded },
+                .fxClickable { expanded = !expanded },
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                text = stringResource(R.string.output).uppercase(),
-                color = FxTextMuted,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.2.sp
+                text = stringResource(R.string.output),
+                color = FxTextPrimary,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
             )
             Icon(
                 imageVector = if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
@@ -423,7 +543,16 @@ private fun OutputSection(audioController: AudioEngineController) {
                 modifier = Modifier.size(20.dp)
             )
         }
-        AnimatedVisibility(visible = expanded) {
+        val reduced = reduceMotion()
+        AnimatedVisibility(
+            visible = expanded,
+            enter = if (reduced) fadeIn(tween(0)) else fadeIn() + expandVertically(
+                animationSpec = spring(dampingRatio = FxMotion.SMOOTH_DAMPING, stiffness = FxMotion.SMOOTH_STIFFNESS)
+            ),
+            exit = if (reduced) fadeOut(tween(0)) else fadeOut() + shrinkVertically(
+                animationSpec = spring(dampingRatio = FxMotion.SMOOTH_DAMPING, stiffness = FxMotion.SMOOTH_STIFFNESS)
+            )
+        ) {
             Column {
                 Spacer(modifier = Modifier.height(8.dp))
                 FxSlider(
@@ -481,26 +610,35 @@ private fun NowPlayingCard(
     val isPlaying by audioController.telemetry.collectMappedAsState { it.isPlaying && it.sourceType == 4 }
     val positionMs by audioController.telemetry.collectMappedAsState { it.mediaPositionMs }
     val durationMs by audioController.telemetry.collectMappedAsState { it.mediaDurationMs }
+    val canToggle = title != null
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(16.dp))
             .background(FxCardSurface)
-            .border(1.dp, FxBorder, RoundedCornerShape(14.dp))
+            .border(1.dp, FxBorder, RoundedCornerShape(16.dp))
             .padding(12.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(
                 onClick = onToggle,
+                enabled = canToggle,
                 modifier = Modifier
                     .size(40.dp)
                     .clip(CircleShape)
-                    .background(if (isPlaying) FxAccentCoral else FxCardElevated)
+                    .background(
+                        when {
+                            !canToggle -> FxCardElevated
+                            isPlaying -> FxInvert
+                            else -> FxCardElevated
+                        }
+                    )
             ) {
                 Icon(
                     imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                     contentDescription = if (isPlaying) stringResource(R.string.pause) else stringResource(R.string.play),
-                    tint = FxTextPrimary
+                    tint = if (isPlaying) FxOnInvert else if (canToggle) FxTextPrimary else FxTextMuted
                 )
             }
             Spacer(modifier = Modifier.width(10.dp))
@@ -517,14 +655,16 @@ private fun NowPlayingCard(
                     color = FxTextPrimary,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Medium,
-                    maxLines = 1
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
             IconButton(onClick = onOpen) {
                 Icon(
                     imageVector = Icons.Default.FolderOpen,
                     contentDescription = stringResource(R.string.open_audio),
-                    tint = FxCyan
+                    tint = FxTextSecondary
                 )
             }
         }
@@ -535,7 +675,7 @@ private fun NowPlayingCard(
                 valueRange = 0f..durationMs.toFloat(),
                 colors = SliderDefaults.colors(
                     thumbColor = FxTextPrimary,
-                    activeTrackColor = FxCyan,
+                    activeTrackColor = FxTextPrimary,
                     inactiveTrackColor = FxTrackInactive
                 )
             )

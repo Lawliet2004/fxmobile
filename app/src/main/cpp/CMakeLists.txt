@@ -67,7 +67,7 @@ add_custom_command(
         CARGO_TARGET_DIR=${CMAKE_CURRENT_BINARY_DIR}/rust
         ${LINKER_ENV}=${RUST_CC}
         AR=${RUST_AR}
-        ${CARGO_EXECUTABLE} build --release --target ${RUST_TARGET} --manifest-path ${FXENGINE_DIR}/Cargo.toml
+        ${CARGO_EXECUTABLE} build --release --lib --target ${RUST_TARGET} --manifest-path ${FXENGINE_DIR}/Cargo.toml
     DEPENDS ${FXENGINE_SOURCES}
     COMMENT "Building Rust fxengine for ${RUST_TARGET}"
     VERBATIM

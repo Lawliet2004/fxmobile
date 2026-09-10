@@ -74,4 +74,22 @@
     <string name="status_session_waiting">Waiting for a player that publishes a session. YouTube usually will not.</string>
     <string name="compare_preset">Compare</string>
     <string name="compare_on">Comparing flat</string>
+    <string name="cd_power_on">Turn master power on</string>
+    <string name="cd_power_off">Turn master power off</string>
+    <string name="cd_eq_curve">Equalizer frequency response curve</string>
+    <string name="a11y_band_slider">Band %1$d, %2$s, %3$s dB</string>
+    <string name="confirm_delete_preset_title">Delete preset?</string>
+    <string name="confirm_delete_preset_message">&#8220;%1$s&#8221; will be removed permanently.</string>
+    <string name="confirm_overwrite_preset_title">Overwrite preset?</string>
+    <string name="confirm_overwrite_preset_message">This will replace the stored settings of &#8220;%1$s&#8221; with the current DSP settings.</string>
+    <string name="confirm_reset_eq_title">Reset all bands?</string>
+    <string name="confirm_reset_eq_message">Every EQ band will be set to 0 dB and its default frequency and Q.</string>
+    <string name="confirm_reset_flat_title">Reset to flat?</string>
+    <string name="confirm_reset_flat_message">All enhancement settings will return to neutral.</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_overwrite">Overwrite</string>
+    <string name="action_reset">Reset</string>
+    <string name="action_keep">Keep</string>
+    <string name="action_discard">Discard</string>
+    <string name="file_opened">File opened</string>
 </resources>

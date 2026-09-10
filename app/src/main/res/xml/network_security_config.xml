@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Default network security configuration: HTTPS-only, no cleartext
+  traffic to any host. FxMobile does not currently make network calls,
+  so the default-deny posture is appropriate.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

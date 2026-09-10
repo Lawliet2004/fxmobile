@@ -54,6 +54,8 @@ impl Ambience {
         self.tap3 = (sr * 0.0377) as usize;
         self.tap4 = (sr * 0.0479) as usize;
         self.write = 0;
+        // Buffer was just resized/cleared — make sure the state is consistent.
+        self.reset();
     }
 
     pub fn set_amount(&mut self, amount: f32) {

@@ -88,6 +88,13 @@ impl Engine {
         self.meter.reset();
     }
 
+    /// Maximum block size, in frames, the engine was prepared for. JNI callers
+    /// can use this to bound the frame count they pass into process() without
+    /// risking `frames * 2` overflow.
+    pub fn max_block(&self) -> usize {
+        self.max_block
+    }
+
     pub fn reset(&mut self) {
         self.dc.reset();
         self.input.reset();

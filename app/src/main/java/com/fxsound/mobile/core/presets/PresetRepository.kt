@@ -43,7 +43,9 @@ class PresetRepository(private val store: StringStore) {
         store.putString("active_preset_id", preset.id)
     }
 
-    private var undoSnapshot: List<Preset>? = null
+    private data class UndoSnapshot(val presets: List<Preset>, val activeId: String)
+
+    private var undoSnapshot: UndoSnapshot? = null
     private val _canUndo = MutableStateFlow(false)
     val canUndo: StateFlow<Boolean> = _canUndo.asStateFlow()
 
@@ -104,31 +106,33 @@ class PresetRepository(private val store: StringStore) {
         }
     }
 
-    fun deleteCustomPreset(presetId: String) {
+    fun deleteCustomPreset(presetId: String): Preset? {
+        val existing = _presets.value.find { it.id == presetId && !it.isBuiltIn } ?: return null
         pushUndo()
         val currentList = _presets.value.filter { it.id != presetId }
         _presets.value = currentList
         persistUserPresets(currentList.filter { !it.isBuiltIn })
 
-        if (_activePreset.value.id == presetId) {
+        if (_activePreset.value.id == existing.id) {
             selectPreset(BuiltInPresets.MUSIC)
+            return BuiltInPresets.MUSIC
         }
+        return null
     }
 
-    fun undoLastMutation(): Boolean {
-        val snapshot = undoSnapshot ?: return false
+    fun undoLastMutation(): Preset? {
+        val snapshot = undoSnapshot ?: return null
         undoSnapshot = null
         _canUndo.value = false
-        _presets.value = snapshot
-        persistUserPresets(snapshot.filter { !it.isBuiltIn })
-        val activeId = _activePreset.value.id
-        val restored = snapshot.find { it.id == activeId } ?: BuiltInPresets.MUSIC
+        _presets.value = snapshot.presets
+        persistUserPresets(snapshot.presets.filter { !it.isBuiltIn })
+        val restored = snapshot.presets.find { it.id == snapshot.activeId } ?: BuiltInPresets.MUSIC
         selectPreset(restored)
-        return true
+        return restored
     }
 
     private fun pushUndo() {
-        undoSnapshot = _presets.value.toList()
+        undoSnapshot = UndoSnapshot(_presets.value.toList(), _activePreset.value.id)
         _canUndo.value = true
     }
 
@@ -161,7 +165,7 @@ class PresetRepository(private val store: StringStore) {
     }
 
     fun isModified(active: Preset, current: DspParameters): Boolean {
-        return active.parameters != current
+        return active.parameters.copy(powerEnabled = current.powerEnabled) != current
     }
 
     private fun persistUserPresets(userPresets: List<Preset>) {

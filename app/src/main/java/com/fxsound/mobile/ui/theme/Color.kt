@@ -2,26 +2,41 @@ package com.fxsound.mobile.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// FxSound Signature Dark Theme Palette
-val FxBgDark = Color(0xFF12151A)           // Main deep slate/black background
-val FxBgDarker = Color(0xFF0D0F13)         // Bottom bar & top bar container
-val FxCardSurface = Color(0xFF1C2029)      // Card and section background
-val FxCardElevated = Color(0xFF252B37)     // Elevated chip and button surface
-val FxBorder = Color(0xFF2D3342)           // Clean subtle card border
-val FxBorderLight = Color(0xFF3B4356)      // Hover/highlight border
+// Nothing OS: black canvas, hairline surfaces, one red accent.
+val FxBgDark = Color(0xFF000000)
+val FxBgDarker = Color(0xFF000000)
+val FxCardSurface = Color(0xFF111111)
+val FxCardElevated = Color(0xFF1A1A1A)
+val FxBorder = Color(0xFF2A2A2A)
+val FxBorderLight = Color(0xFF3A3A3A)
 
-// Accents
-val FxAccentCoral = Color(0xFFE23E57)      // FxSound signature electric coral red (Power/Accent)
-val FxAccentCoralGlow = Color(0x66E23E57)  // Glowing aura for power button
-val FxCyan = Color(0xFF00ADB5)             // Vibrant cyan for EQ curve and frequency spectrum
-val FxCyanGlow = Color(0x4D00ADB5)         // Cyan curve fill/glow
-val FxGreen = Color(0xFF00C853)            // Level meter normal signal
-val FxYellow = Color(0xFFFFD600)           // Level meter warning signal
-val FxRed = Color(0xFFFF3D00)              // Clipping / danger indicator
-val FxDanger = Color(0xFFFF3D00)           // Danger / delete accent
+val FxAccent = Color(0xFFD71921)
+val FxAccentGlow = Color(0x33D71921)
+val FxOnAccent = Color(0xFFFFFFFF)
 
-// Typography & Content
-val FxTextPrimary = Color(0xFFFFFFFF)      // High contrast white text
-val FxTextSecondary = Color(0xFF9EABB8)    // Muted slate gray secondary text
-val FxTextMuted = Color(0xFF6B7788)        // Disabled / hint text
-val FxTrackInactive = Color(0xFF262C38)    // Inactive slider track
+val FxInvert = Color(0xFFFFFFFF)
+val FxOnInvert = Color(0xFF000000)
+
+val FxGreen = Color(0xFF34C759)
+val FxYellow = Color(0xFFFFD60A)
+val FxRed = Color(0xFFD71921)
+val FxDanger = Color(0xFFD71921)
+
+val FxTextPrimary = Color(0xFFFFFFFF)
+val FxTextSecondary = Color(0xFFA3A3A3)
+val FxTextMuted = Color(0xFF6B6B6B)
+val FxTrackInactive = Color(0xFF2A2A2A)
+val FxCurveFill = Color(0x1FFFFFFF)
+
+val FxLightBg = Color(0xFFF5F5F5)
+val FxLightBgElevated = Color(0xFFFFFFFF)
+val FxLightCardSurface = Color(0xFFFFFFFF)
+val FxLightCardElevated = Color(0xFFF0F0F0)
+val FxLightBorder = Color(0xFFD6D6D6)
+val FxLightTextPrimary = Color(0xFF000000)
+val FxLightTextSecondary = Color(0xFF5C5C5C)
+val FxLightTextMuted = Color(0xFF8A8A8A)
+val FxLightTrackInactive = Color(0xFFD8D8D8)
+
+val FxAccentLight = Color(0xFFD71921)
+val FxOnAccentLight = Color(0xFFFFFFFF)

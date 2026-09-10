@@ -13,19 +13,18 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.fxsound.mobile.ui.theme.FxGreen
-import com.fxsound.mobile.ui.theme.FxRed
+import com.fxsound.mobile.ui.theme.FxAccent
 import com.fxsound.mobile.ui.theme.FxTextMuted
+import com.fxsound.mobile.ui.theme.FxTextPrimary
 import com.fxsound.mobile.ui.theme.FxTrackInactive
-import com.fxsound.mobile.ui.theme.FxYellow
+import com.fxsound.mobile.ui.theme.NumericTextStyle
 
 @Composable
 fun FxLevelMeter(
@@ -34,15 +33,7 @@ fun FxLevelMeter(
     isClipping: Boolean,
     modifier: Modifier = Modifier
 ) {
-    val meterGradient = remember {
-        Brush.horizontalGradient(
-            0.0f to FxGreen,
-            0.75f to FxGreen,
-            0.88f to FxYellow,
-            1.0f to FxRed
-        )
-    }
-
+    val fill = if (isClipping) FxAccent else FxTextPrimary
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -55,29 +46,31 @@ fun FxLevelMeter(
             text = "L",
             color = FxTextMuted,
             fontSize = 10.sp,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            fontFamily = NumericTextStyle.fontFamily
         )
         SingleMeterBar(
             level = peakLeft.coerceIn(0f, 1f),
-            gradient = meterGradient,
+            color = fill,
             modifier = Modifier.weight(1f)
         )
         Text(
             text = "R",
             color = FxTextMuted,
             fontSize = 10.sp,
-            fontWeight = FontWeight.Bold
+            fontWeight = FontWeight.Bold,
+            fontFamily = NumericTextStyle.fontFamily
         )
         SingleMeterBar(
             level = peakRight.coerceIn(0f, 1f),
-            gradient = meterGradient,
+            color = fill,
             modifier = Modifier.weight(1f)
         )
         Box(
             modifier = Modifier
                 .size(8.dp)
                 .clip(CircleShape)
-                .background(if (isClipping) FxRed else FxTrackInactive)
+                .background(if (isClipping) FxAccent else FxTrackInactive)
         )
     }
 }
@@ -85,7 +78,7 @@ fun FxLevelMeter(
 @Composable
 private fun SingleMeterBar(
     level: Float,
-    gradient: Brush,
+    color: Color,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -100,7 +93,7 @@ private fun SingleMeterBar(
                     .fillMaxHeight()
                     .fillMaxWidth(fraction = level)
                     .clip(RoundedCornerShape(3.dp))
-                    .background(gradient)
+                    .background(color)
             )
         }
     }

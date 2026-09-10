@@ -1,3 +1,10 @@
+// Safety contract for the FFI surface is documented in `include/fxengine.h`
+// and in the comments above each `unsafe extern "C" fn`. The clippy
+// `missing_safety_doc` lint is too noisy for this style of FFI surface,
+// so it is allowed at the crate level; the inner unsafe blocks each
+// carry a SAFETY comment explaining the invariant they rely on.
+#![allow(clippy::missing_safety_doc)]
+
 mod biquad;
 mod engine;
 mod eq;
@@ -13,7 +20,10 @@ unsafe fn engine_mut<'a>(ptr: *mut Engine) -> Option<&'a mut Engine> {
     if ptr.is_null() {
         None
     } else {
-        Some(&mut *ptr)
+        // SAFETY: caller must ensure `ptr` is a valid, non-null, properly
+        // aligned pointer to an `Engine` produced by `fx_engine_create` and
+        // not yet destroyed.
+        Some(unsafe { &mut *ptr })
     }
 }
 
@@ -21,7 +31,10 @@ unsafe fn engine_ref<'a>(ptr: *const Engine) -> Option<&'a Engine> {
     if ptr.is_null() {
         None
     } else {
-        Some(&*ptr)
+        // SAFETY: caller must ensure `ptr` is a valid, non-null, properly
+        // aligned pointer to an `Engine` produced by `fx_engine_create` and
+        // not yet destroyed.
+        Some(unsafe { &*ptr })
     }
 }
 
@@ -61,8 +74,18 @@ pub unsafe extern "C" fn fx_engine_process_interleaved(
         return;
     }
     if let Some(e) = engine_mut(engine) {
-        let n = frames as usize;
-        e.process_interleaved(std::slice::from_raw_parts_mut(audio, n * 2), n);
+        // Clamp the frame count to the engine's max block size so that the
+        // `n * 2` slice math below can never overflow `usize` (and the audio
+        // buffer can never be over-read). Saturating mul is used as an extra
+        // safety net.
+        let max_block = e.max_block() as u32;
+        let n_frames = frames.min(max_block);
+        let n = n_frames as usize;
+        let needed = n.saturating_mul(2);
+        // SAFETY: `audio` is non-null, properly aligned, and points to at
+        // least `needed` f32 values (caller contract, plus the clamp above).
+        let slice = unsafe { std::slice::from_raw_parts_mut(audio, needed) };
+        e.process_interleaved(slice, n);
     }
 }
 
@@ -77,12 +100,17 @@ pub unsafe extern "C" fn fx_engine_process(
         return;
     }
     if let Some(e) = engine_mut(engine) {
-        let n = frames as usize;
-        e.process(
-            std::slice::from_raw_parts(input, n * 2),
-            std::slice::from_raw_parts_mut(output, n * 2),
-            n,
-        );
+        let max_block = e.max_block() as u32;
+        let n_frames = frames.min(max_block);
+        let n = n_frames as usize;
+        let needed = n.saturating_mul(2);
+        // SAFETY: `input` and `output` are non-null, properly aligned, and
+        // point to at least `needed` f32 values (caller contract, plus the
+        // clamp above). The two slices do not overlap because the caller
+        // contract for `fx_engine_process` is non-interleaved I/O.
+        let in_slice = unsafe { std::slice::from_raw_parts(input, needed) };
+        let out_slice = unsafe { std::slice::from_raw_parts_mut(output, needed) };
+        e.process(in_slice, out_slice, n);
     }
 }
 
@@ -272,18 +300,23 @@ mod tests {
         e.set_dynamic(0.0);
         e.set_leveling(0.0);
         e.set_eq_enabled(false);
-        let mut buf = vec![0.0f32; 512 * 2];
-        for i in 0..512 {
+        // The limiter adds 2 ms of lookahead (96 samples at 48 kHz).
+        // Compare the post-lookahead output against the same input region:
+        // `output[i + 96]` corresponds to input `i`.
+        let lookahead = 96usize;
+        let total = 4096usize;
+        let mut buf = vec![0.0f32; (total + lookahead) * 2];
+        for i in 0..(total + lookahead) {
             let s = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48_000.0).sin() * 0.5;
             buf[i * 2] = s;
             buf[i * 2 + 1] = s * 0.7;
         }
         let orig = buf.clone();
-        e.process_interleaved(&mut buf, 512);
+        e.process_interleaved(&mut buf, total + lookahead);
         let mut max_diff = 0.0f32;
-        for i in 0..512 {
+        for i in 0..total {
             let in_m = (orig[i * 2] + orig[i * 2 + 1]) * 0.5;
-            let out_m = (buf[i * 2] + buf[i * 2 + 1]) * 0.5;
+            let out_m = (buf[(i + lookahead) * 2] + buf[(i + lookahead) * 2 + 1]) * 0.5;
             max_diff = max_diff.max((in_m - out_m).abs());
         }
         // DC + other stages may add a tiny residual; surround itself is mid-preserving.
@@ -524,15 +557,16 @@ mod tests {
     #[test]
     fn music_preset_golden() {
         let mut e = Engine::new(48_000.0, 512);
-        e.set_bass(3.5);
-        e.set_clarity(3.0);
-        e.set_ambience(2.0);
-        e.set_surround(1.5);
-        e.set_dynamic(2.0);
-        e.set_leveling(1.0);
+        // Must match BuiltInPresets.MUSIC
+        e.set_bass(4.7);
+        e.set_clarity(3.9);
+        e.set_ambience(2.8);
+        e.set_surround(2.8);
+        e.set_dynamic(1.6);
+        e.set_leveling(0.0);
         e.set_eq_enabled(true);
         e.set_eq_band_count(10);
-        let gains = [2.5, 2.0, 1.0, 0.0, 0.0, 0.5, 1.5, 2.5, 3.0, 3.5];
+        let gains = [0.0, 2.0, 2.0, 1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 2.0];
         for (i, g) in gains.iter().enumerate() {
             e.set_eq_gain(i as u32, *g);
         }
@@ -543,5 +577,101 @@ mod tests {
         let energy: f32 = buf.iter().map(|x| x * x).sum();
         assert!(peak <= 1.0, "peak {peak}");
         assert!(energy > 1.0, "energy {energy}");
+        assert!((e.bass() - 4.7).abs() < 1e-5);
+        assert!((e.eq_gain(1) - 2.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn limiter_lookahead_reduces_gain_before_overshoot() {
+        // Build a dry engine with master_db high so the limiter has to work.
+        // A 1.5-amplitude sine (well over 1.0) is fed in; the limiter must
+        // (a) keep the output peak under 0.99 and (b) apply gain reduction
+        // *before* the peak emerges in the output (i.e. the first output
+        // sample after the limiter engages is no longer a hard clip).
+        let mut e = Engine::new(48_000.0, 512);
+        e.set_master_db(12.0);
+        e.set_bass(0.0);
+        e.set_clarity(0.0);
+        e.set_ambience(0.0);
+        e.set_surround(0.0);
+        e.set_dynamic(0.0);
+        e.set_leveling(0.0);
+        e.set_eq_enabled(false);
+
+        // 4096 frames of a 1.5-amplitude 440 Hz sine. The DC blocker and
+        // input gain are 0 dB so we hit the limiter with a true 1.5 peak.
+        let frames = 4096usize;
+        let amp = 1.5f32;
+        let freq = 440.0f32;
+        let mut buf = vec![0.0f32; frames * 2];
+        for i in 0..frames {
+            let s = (2.0 * std::f32::consts::PI * freq * i as f32 / 48_000.0).sin() * amp;
+            buf[i * 2] = s;
+            buf[i * 2 + 1] = s;
+        }
+        e.process_interleaved(&mut buf, frames);
+
+        // (a) peak must be at or below 0.99 (threshold 0.965 + a hair for
+        // numerical noise on tanh-based soft clip).
+        let peak = buf.iter().fold(0.0f32, |a, x| a.max(x.abs()));
+        assert!(peak <= 0.99, "limiter failed to contain peak: {peak}");
+
+        // (b) The lookahead must have applied gain reduction before the
+        // overshoot. Find the index of the first input sample whose absolute
+        // value exceeds the limiter threshold (0.965). The output at that
+        // index (after accounting for the 2 ms = 96 sample lookahead delay)
+        // must be reduced by more than 5% relative to the input.
+        let mut first_overshoot = None;
+        for i in 0..frames {
+            let s = (2.0 * std::f32::consts::PI * freq * i as f32 / 48_000.0).sin() * amp;
+            if s.abs() > 0.965 {
+                first_overshoot = Some(i);
+                break;
+            }
+        }
+        let first = match first_overshoot {
+            Some(v) => v,
+            None => panic!("sine never crossed threshold (test setup error)"),
+        };
+        // The lookahead is at most 192 samples, default 96 at 48 kHz. Read
+        // the output at `first` plus enough lookahead for the limiter to
+        // have seen the peak in its buffer.
+        let lookahead = 96usize;
+        let out_idx = (first + lookahead).min(frames - 1);
+        let input_peak = (2.0 * std::f32::consts::PI * freq * first as f32 / 48_000.0).sin()
+            .abs()
+            * amp;
+        let output_sample = buf[out_idx * 2].abs();
+        assert!(
+            output_sample < input_peak * 0.95,
+            "lookahead did not apply gain reduction: in={input_peak} out={output_sample} \
+             (first overshoot at {first}, output at {out_idx})"
+        );
+    }
+
+    #[test]
+    fn eq_setup_bands_preserves_overlapping_gains() {
+        // Setting up 5 bands then 10 bands should preserve the first 5 gains
+        // (Issue 2 / 10).
+        let mut e = Engine::new(48_000.0, 512);
+        e.set_eq_enabled(true);
+        e.set_eq_band_count(5);
+        e.reset_eq();
+        for i in 0..5 {
+            e.set_eq_gain(i, (i as f32 + 1.0) * 1.5);
+        }
+        e.set_eq_band_count(10);
+        for i in 0..5 {
+            let got = e.eq_gain(i);
+            let want = (i as f32 + 1.0) * 1.5;
+            assert!(
+                (got - want).abs() < 1e-5,
+                "band {i}: preserved {got} vs original {want}"
+            );
+        }
+        // Bands 5..=9 should have been zeroed on re-layout.
+        for i in 5..10 {
+            assert_eq!(e.eq_gain(i), 0.0, "band {i} should be 0 after grow");
+        }
     }
 }

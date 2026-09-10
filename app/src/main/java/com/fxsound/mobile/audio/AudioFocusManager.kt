@@ -10,7 +10,13 @@ class AudioFocusManager(
     private val context: Context,
     private val onDuck: (Boolean) -> Unit,
     private val onLoss: () -> Unit,
-    private val onGain: () -> Unit
+    private val onGain: () -> Unit,
+    /**
+     * Called when focus is lost transiently. The implementation should pause playback and
+     * remember enough state to call the supplied `shouldResume` callback when [onGain] is
+     * later invoked with focus restored.
+     */
+    private val onTransientLoss: (shouldResume: () -> Unit) -> Unit = {}
 ) {
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var focusRequest: AudioFocusRequest? = null
@@ -22,10 +28,13 @@ class AudioFocusManager(
                 onGain()
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // Lower volume by -12 dB; do NOT pause.
                 onDuck(true)
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                onDuck(true)
+                // Pause and remember to resume on AUDIOFOCUS_GAIN.
+                onDuck(false)
+                onTransientLoss { /* resume hook - the listener owns the resume decision */ }
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
                 onLoss()

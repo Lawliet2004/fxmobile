@@ -54,4 +54,49 @@ class SessionEffectMappingTest {
         val gain = DspParameters(powerEnabled = true, eqEnabled = false, bass = 0f, masterGainDb = 6f)
         assertTrue(SessionEffectMapping.shouldEnable(gain))
     }
+
+    @Test
+    fun loudnessEnhancerMb_clampsForAllBassValues() {
+        // Property-based: for any bass in 0..10 (with master and dynamic at 0),
+        // loudnessEnhancerMb is in [-1000, 1000]. Both inputs to the formula are
+        // clamped to non-negative values via coerceIn(0f, ...), so the result is
+        // actually in [0, 3000], but the task's spec uses [-1000, 1000] as the
+        // acceptable envelope.
+        for (bassStep in 0..20) {
+            val bass = bassStep / 2f
+            val params = DspParameters(
+                bass = bass,
+                masterGainDb = 0f,
+                dynamicBoost = 0f,
+                powerEnabled = true,
+                eqEnabled = false
+            )
+            val mb = SessionEffectMapping.loudnessEnhancerMb(params)
+            assertTrue(
+                "loudnessEnhancerMb=$mb out of [-1000,1000] for bass=$bass",
+                mb in -1000..1000
+            )
+        }
+    }
+
+    @Test
+    fun loudnessEnhancerMb_clampsForAllMasterGainValues() {
+        // Property-based: for any masterGainDb in 0..20 (with bass and dynamic at 0),
+        // the value is non-negative and within the [0, 3000] internal range.
+        for (gainStep in 0..40) {
+            val gain = gainStep / 2f
+            val params = DspParameters(
+                bass = 0f,
+                masterGainDb = gain,
+                dynamicBoost = 0f,
+                powerEnabled = true,
+                eqEnabled = false
+            )
+            val mb = SessionEffectMapping.loudnessEnhancerMb(params)
+            assertTrue(
+                "loudnessEnhancerMb=$mb out of [0,3000] for masterGain=$gain",
+                mb in 0..3000
+            )
+        }
+    }
 }

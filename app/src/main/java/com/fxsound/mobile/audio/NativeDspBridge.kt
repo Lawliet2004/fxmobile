@@ -1,10 +1,27 @@
 package com.fxsound.mobile.audio
 
+import android.util.Log
+
 object NativeDspBridge {
 
+    private val librariesLoaded: Boolean by lazy {
+        runCatching {
+            System.loadLibrary("oboe")
+            System.loadLibrary("fxmobile_dsp")
+            true
+        }.getOrElse { e ->
+            Log.w("FxEngine", "Native libraries not loaded: ${e.message}")
+            false
+        }
+    }
+
+    val isAvailable: Boolean
+        get() = librariesLoaded
+
     init {
-        System.loadLibrary("oboe")
-        System.loadLibrary("fxmobile_dsp")
+        // Load on first access to this object, before any external call.
+        // Failures are caught above, so pure-JVM unit tests still work.
+        librariesLoaded
     }
 
     external fun createEngine(sampleRate: Float, maxBlockSize: Int): Long

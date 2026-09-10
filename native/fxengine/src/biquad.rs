@@ -67,11 +67,15 @@ impl Biquad {
         self.update();
     }
 
+    /// Set the centre frequency and recompute coefficients.
+    #[allow(dead_code)] // kept for direct callers; Equalizer no longer uses it
     pub fn set_frequency(&mut self, f: f32) {
         self.freq = f.clamp(10.0, self.sample_rate * 0.49);
         self.update();
     }
 
+    /// Set the Q factor and recompute coefficients.
+    #[allow(dead_code)] // kept for direct callers; Equalizer no longer uses it
     pub fn set_q(&mut self, q: f32) {
         self.q = q.clamp(0.1, 10.0);
         self.update();
@@ -112,6 +116,11 @@ impl Biquad {
         }
     }
 
+    /// Magnitude response in dB at the given frequency, using the
+    /// coefficients most recently derived by `update()`. Equalizer no longer
+    /// uses this directly (it recomputes from the snapshot via
+    /// `magnitude_db_for`), but the method is part of the public API.
+    #[allow(dead_code)]
     pub fn magnitude_db(&self, freq: f32) -> f32 {
         if freq <= 0.0 {
             return 0.0;
@@ -123,6 +132,99 @@ impl Biquad {
         let num_im = -self.b1 * sin_w - self.b2 * sin_2w;
         let den_re = 1.0 + self.a1 * cos_w + self.a2 * cos_2w;
         let den_im = -self.a1 * sin_w - self.a2 * sin_2w;
+        let den = den_re * den_re + den_im * den_im;
+        if den < 1e-12 {
+            return 0.0;
+        }
+        let mag = ((num_re * num_re + num_im * num_im) / den).sqrt();
+        20.0 * mag.max(1e-6).log10()
+    }
+
+    /// Magnitude response computed for an arbitrary (kind, freq, gain_db, q)
+    /// combination, without mutating `self`. Used by the equalizer when it
+    /// wants to query the curve using its own parameter snapshot rather than
+    /// the biquad's last `update()`.
+    pub fn magnitude_db_for(
+        &self,
+        kind: FilterType,
+        freq: f32,
+        gain_db: f32,
+        q: f32,
+        test: f32,
+    ) -> f32 {
+        if test <= 0.0 {
+            return 0.0;
+        }
+        let sr = self.sample_rate;
+        // Re-derive coefficients into locals so we never touch self's state.
+        let w0 = 2.0 * std::f32::consts::PI * freq / sr;
+        let (sin_w0, cos_w0) = w0.sin_cos();
+        let a = 10.0_f32.powf(gain_db / 40.0);
+        let alpha = sin_w0 / (2.0 * q);
+
+        let (b0, b1, b2, a0, a1, a2) = match kind {
+            FilterType::Peaking => (
+                1.0 + alpha * a,
+                -2.0 * cos_w0,
+                1.0 - alpha * a,
+                1.0 + alpha / a,
+                -2.0 * cos_w0,
+                1.0 - alpha / a,
+            ),
+            FilterType::LowShelf => {
+                let sa = a.sqrt();
+                (
+                    a * ((a + 1.0) - (a - 1.0) * cos_w0 + 2.0 * sa * alpha),
+                    2.0 * a * ((a - 1.0) - (a + 1.0) * cos_w0),
+                    a * ((a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sa * alpha),
+                    (a + 1.0) + (a - 1.0) * cos_w0 + 2.0 * sa * alpha,
+                    -2.0 * ((a - 1.0) + (a + 1.0) * cos_w0),
+                    (a + 1.0) + (a - 1.0) * cos_w0 - 2.0 * sa * alpha,
+                )
+            }
+            FilterType::HighShelf => {
+                let sa = a.sqrt();
+                (
+                    a * ((a + 1.0) + (a - 1.0) * cos_w0 + 2.0 * sa * alpha),
+                    -2.0 * a * ((a - 1.0) + (a + 1.0) * cos_w0),
+                    a * ((a + 1.0) + (a - 1.0) * cos_w0 - 2.0 * sa * alpha),
+                    (a + 1.0) - (a - 1.0) * cos_w0 + 2.0 * sa * alpha,
+                    2.0 * ((a - 1.0) - (a + 1.0) * cos_w0),
+                    (a + 1.0) - (a - 1.0) * cos_w0 - 2.0 * sa * alpha,
+                )
+            }
+            FilterType::LowPass => (
+                (1.0 - cos_w0) / 2.0,
+                1.0 - cos_w0,
+                (1.0 - cos_w0) / 2.0,
+                1.0 + alpha,
+                -2.0 * cos_w0,
+                1.0 - alpha,
+            ),
+            FilterType::HighPass => (
+                (1.0 + cos_w0) / 2.0,
+                -(1.0 + cos_w0),
+                (1.0 + cos_w0) / 2.0,
+                1.0 + alpha,
+                -2.0 * cos_w0,
+                1.0 - alpha,
+            ),
+        };
+
+        let inv = if a0.abs() > 1e-12 { 1.0 / a0 } else { 1.0 };
+        let nb0 = b0 * inv;
+        let nb1 = b1 * inv;
+        let nb2 = b2 * inv;
+        let na1 = a1 * inv;
+        let na2 = a2 * inv;
+
+        let w = 2.0 * std::f32::consts::PI * test / sr;
+        let (sin_w, cos_w) = w.sin_cos();
+        let (sin_2w, cos_2w) = (2.0 * w).sin_cos();
+        let num_re = nb0 + nb1 * cos_w + nb2 * cos_2w;
+        let num_im = -nb1 * sin_w - nb2 * sin_2w;
+        let den_re = 1.0 + na1 * cos_w + na2 * cos_2w;
+        let den_im = -na1 * sin_w - na2 * sin_2w;
         let den = den_re * den_re + den_im * den_im;
         if den < 1e-12 {
             return 0.0;

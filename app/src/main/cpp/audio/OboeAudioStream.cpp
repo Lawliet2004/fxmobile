@@ -46,6 +46,11 @@ bool OboeAudioStream::startUnlocked() {
     }
 
     int32_t actualSampleRate = m_stream->getSampleRate();
+    m_cachedSampleRate.store(actualSampleRate, std::memory_order_relaxed);
+    m_cachedChannelCount.store(m_stream->getChannelCount(), std::memory_order_relaxed);
+    m_cachedBufferSize.store(m_stream->getBufferSizeInFrames(), std::memory_order_relaxed);
+    m_cachedBurstFrames.store(m_stream->getFramesPerBurst(), std::memory_order_relaxed);
+    m_cachedIsAAudio.store(m_stream->getAudioApi() == oboe::AudioApi::AAudio, std::memory_order_relaxed);
     if (m_dspEngine) {
         m_dspEngine->prepare(static_cast<float>(actualSampleRate), 1024);
     }
@@ -126,19 +131,19 @@ void OboeAudioStream::resetPcmRing() {
 }
 
 int32_t OboeAudioStream::getSampleRate() const {
-    return m_stream ? m_stream->getSampleRate() : 48000;
+    return m_cachedSampleRate.load(std::memory_order_relaxed);
 }
 
 int32_t OboeAudioStream::getChannelCount() const {
-    return m_stream ? m_stream->getChannelCount() : 2;
+    return m_cachedChannelCount.load(std::memory_order_relaxed);
 }
 
 int32_t OboeAudioStream::getBufferSize() const {
-    return m_stream ? m_stream->getBufferSizeInFrames() : 256;
+    return m_cachedBufferSize.load(std::memory_order_relaxed);
 }
 
 int32_t OboeAudioStream::getFramesPerBurst() const {
-    return m_stream ? m_stream->getFramesPerBurst() : 128;
+    return m_cachedBurstFrames.load(std::memory_order_relaxed);
 }
 
 double OboeAudioStream::getCpuLoad() const {
@@ -146,11 +151,11 @@ double OboeAudioStream::getCpuLoad() const {
 }
 
 int64_t OboeAudioStream::getFramesWritten() const {
-    return m_stream ? m_stream->getFramesWritten() : 0;
+    return 0;
 }
 
 bool OboeAudioStream::isAAudio() const {
-    return m_stream ? (m_stream->getAudioApi() == oboe::AudioApi::AAudio) : true;
+    return m_cachedIsAAudio.load(std::memory_order_relaxed);
 }
 
 oboe::DataCallbackResult OboeAudioStream::onAudioReady(oboe::AudioStream* audioStream, void* audioData, int32_t numFrames) {
@@ -209,12 +214,19 @@ void OboeAudioStream::setupToneGenerators(float sampleRate) {
     m_sinePhase = 0.0f;
     m_sweepPhase = 0.0f;
     m_sweepCurrentFreq = 20.0f;
+    m_sweepCrossfade = 0;
+    m_sweepFadeUp = false;
+    m_sweepAmplitude = 1.0f;
     m_pinkB0 = m_pinkB1 = m_pinkB2 = m_pinkB3 = m_pinkB4 = m_pinkB5 = m_pinkB6 = 0.0f;
+    (void)sampleRate;
 }
 
 void OboeAudioStream::generateAudioSource(float* buffer, int32_t numFrames) {
     AudioSourceType type = m_sourceType.load(std::memory_order_relaxed);
-    float sampleRate = m_stream ? static_cast<float>(m_stream->getSampleRate()) : 48000.0f;
+    // Use the cached sample rate set in startUnlocked() instead of doing a
+    // virtual call into Oboe on every audio callback.
+    float sampleRate = static_cast<float>(m_cachedSampleRate.load(std::memory_order_relaxed));
+    if (sampleRate <= 0.0f) sampleRate = 48000.0f;
     constexpr float PI = 3.14159265358979323846f;
 
     switch (type) {
@@ -235,19 +247,76 @@ void OboeAudioStream::generateAudioSource(float* buffer, int32_t numFrames) {
             break;
         }
         case AudioSourceType::ToneSweep: {
-            // Logarithmic sweep 20 Hz to 20 kHz over 5 seconds
+            // Logarithmic sweep 20 Hz to 20 kHz over 5 seconds.
+            //
+            // To avoid a click when the frequency wraps from 20 kHz back to
+            // 20 Hz (the phase is not continuous across the wrap), we run
+            // a 5 ms linear fade-out, reset the phase and frequency, then
+            // run a 5 ms linear fade-in. The total fade is 10 ms.
+            //
+            // State machine (per sample, runs once per output frame):
+            //   * `m_sweepCrossfade == 0` and `m_sweepCurrentFreq <= 20000`
+            //     → steady state, full amplitude.
+            //   * `m_sweepCurrentFreq > 20000` for the first time
+            //     → enter fade-down half, m_sweepCrossfade = crossfadeHalf,
+            //       m_sweepFadeUp = false.
+            //   * mid-fade-down: amplitude = m_sweepCrossfade / crossfadeHalf
+            //     (decreasing from 1 to 0). When m_sweepCrossfade hits 0,
+            //     reset phase/freq, m_sweepFadeUp = true, m_sweepCrossfade
+            //     = crossfadeHalf.
+            //   * mid-fade-up: amplitude = 1 - m_sweepCrossfade / crossfadeHalf
+            //     (increasing from 0 to 1). When m_sweepCrossfade hits 0,
+            //     exit to steady state, amplitude = 1.
             float sweepSpeed = std::pow(20000.0f / 20.0f, 1.0f / (5.0f * sampleRate));
+            const int32_t crossfadeHalf = static_cast<int32_t>(0.005f * sampleRate); // 5 ms
+            if (crossfadeHalf < 1) {
+                // Pathological: sample rate too low for a 5 ms crossfade.
+                // Skip the fade entirely and accept a possible click.
+                m_sweepCrossfade = 0;
+                m_sweepAmplitude = 1.0f;
+            }
             for (int32_t i = 0; i < numFrames; ++i) {
                 float phaseIncrement = (2.0f * PI * m_sweepCurrentFreq) / sampleRate;
                 float s = std::sin(m_sweepPhase) * 0.40f;
                 m_sweepPhase += phaseIncrement;
                 if (m_sweepPhase >= 2.0f * PI) m_sweepPhase -= 2.0f * PI;
                 m_sweepCurrentFreq *= sweepSpeed;
-                if (m_sweepCurrentFreq > 20000.0f) {
-                    m_sweepCurrentFreq = 20.0f;
+
+                if (m_sweepCrossfade > 0) {
+                    // Mid-crossfade. Compute amplitude from the remaining
+                    // count, then decrement. The direction of the ramp is
+                    // determined by `m_sweepFadeUp`: false → fade down
+                    // (1 → 0), true → fade up (0 → 1).
+                    const float frac = static_cast<float>(m_sweepCrossfade) /
+                                       static_cast<float>(crossfadeHalf);
+                    m_sweepAmplitude = m_sweepFadeUp ? (1.0f - frac) : frac;
+                    m_sweepCrossfade -= 1;
+                    if (m_sweepCrossfade == 0) {
+                        if (!m_sweepFadeUp) {
+                            // End of fade-down: reset phase/freq, start
+                            // fade-up from silence.
+                            m_sweepPhase = 0.0f;
+                            m_sweepCurrentFreq = 20.0f;
+                            m_sweepFadeUp = true;
+                            m_sweepAmplitude = 0.0f;
+                            m_sweepCrossfade = crossfadeHalf;
+                        } else {
+                            // End of fade-up: return to steady state.
+                            m_sweepFadeUp = false;
+                            m_sweepAmplitude = 1.0f;
+                        }
+                    }
+                } else if (m_sweepCurrentFreq > 20000.0f) {
+                    // Hit the top of the sweep. Enter fade-down on the
+                    // next sample. The very first sample in this branch
+                    // is still at full amplitude.
+                    m_sweepCurrentFreq = 20000.0f;
+                    m_sweepFadeUp = false;
+                    m_sweepCrossfade = crossfadeHalf;
                 }
-                buffer[i * 2] = s;
-                buffer[i * 2 + 1] = s;
+
+                buffer[i * 2] = s * m_sweepAmplitude;
+                buffer[i * 2 + 1] = s * m_sweepAmplitude;
             }
             break;
         }

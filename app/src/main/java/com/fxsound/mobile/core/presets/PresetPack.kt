@@ -15,6 +15,14 @@ object PresetPack {
     }
 
     fun decode(json: String): List<Preset> {
+        val trimmed = json.trimStart()
+        // Legacy v1 form: a bare JSON array of presets (no wrapping object).
+        if (trimmed.startsWith("[")) {
+            val arr = JSONArray(json)
+            return (0 until arr.length()).mapNotNull { i ->
+                Preset.fromJson(arr.getJSONObject(i).toString())?.copy(isBuiltIn = false)
+            }
+        }
         val root = JSONObject(json)
         if (root.has("presets")) {
             val arr = root.getJSONArray("presets")

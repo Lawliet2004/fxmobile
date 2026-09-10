@@ -1,14 +1,18 @@
 package com.fxsound.mobile
 
 import android.Manifest
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
+import androidx.core.view.WindowCompat
 import com.fxsound.mobile.ui.navigation.FxAppScaffold
 import com.fxsound.mobile.ui.theme.FxMobileTheme
+import com.fxsound.mobile.audio.AudioEngineController
 
 class MainActivity : ComponentActivity() {
 
@@ -19,6 +23,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+        WindowCompat.getInsetsController(window, window.decorView).apply {
+            isAppearanceLightStatusBars = false
+            isAppearanceLightNavigationBars = false
+        }
+
         val app = application as FxMobileApp
         val audioEngine = app.audioEngineController
         val presetRepo = app.presetRepository
@@ -27,6 +37,8 @@ class MainActivity : ComponentActivity() {
                 notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
+
+        handleIntent(intent, audioEngine)
 
         setContent {
             FxMobileTheme {
@@ -38,6 +50,20 @@ class MainActivity : ComponentActivity() {
                     reportFullyDrawn()
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        val audioEngine = (application as FxMobileApp).audioEngineController
+        handleIntent(intent, audioEngine)
+    }
+
+    private fun handleIntent(intent: Intent?, audioEngine: AudioEngineController) {
+        val data: Uri? = intent?.data
+        if (data != null) {
+            audioEngine.openAudioFile(data)
         }
     }
 

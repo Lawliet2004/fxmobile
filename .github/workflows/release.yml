@@ -8,9 +8,64 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  release:
-    name: Build & Publish Release
+  host:
+    name: Host CLI (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            asset: fxengine-linux-x64
+            bin: fxengine
+          - os: windows-latest
+            asset: fxengine-windows-x64.exe
+            bin: fxengine.exe
+          - os: macos-latest
+            asset: fxengine-macos-x64
+            bin: fxengine
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test fxengine
+        run: cargo test --manifest-path native/fxengine/Cargo.toml
+
+      - name: Build host CLI
+        run: cargo build --release --bin fxengine --manifest-path native/fxengine/Cargo.toml
+
+      - name: Stage named artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          src="native/fxengine/target/release/${{ matrix.bin }}"
+          dst="dist/${{ matrix.asset }}"
+          cp "$src" "$dst"
+          chmod +x "$dst"
+          ls -lh "$dst"
+          ./"$dst" --help
+          ./"$dst" --version
+          ./"$dst" --smoke
+
+      - name: Upload host binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  android:
+    name: Build Release APKs & AAB
     runs-on: ubuntu-latest
 
     steps:
@@ -24,6 +79,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: 'gradle'
 
       - name: Set up Android SDK & NDK
         uses: android-actions/setup-android@v3
@@ -45,21 +101,74 @@ jobs:
       - name: Build Release APKs
         run: ./gradlew assembleRelease
 
+      - name: Build Release AAB
+        run: ./gradlew :app:bundleRelease
+
+      - name: Capture version name
+        id: version
+        run: |
+          VERSION=$(./gradlew -q :app:properties | grep '^versionName' | awk '{print $2}' | tr -d '\r')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version captured: $VERSION"
+
       - name: Prepare Release Artifacts
         run: |
           mkdir -p release-artifacts
           cp app/build/outputs/apk/release/*.apk release-artifacts/ || true
+          cp app/build/outputs/bundle/release/*.aab release-artifacts/ || true
           if [ -d "install" ]; then
             cp install/*.apk release-artifacts/ || true
           fi
+          # Rename R8 mapping file with version for easier upload.
+          if [ -f "app/build/outputs/mapping/release/mapping.txt" ]; then
+            cp app/build/outputs/mapping/release/mapping.txt \
+               "release-artifacts/mapping-${{ steps.version.outputs.version }}.txt" || true
+          fi
           ls -la release-artifacts/
+
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk
+          path: release-artifacts/*.apk
+          if-no-files-found: error
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@v4
+        with:
+          name: aab
+          path: release-artifacts/*.aab
+          if-no-files-found: warn
+
+      - name: Upload R8 mapping
+        uses: actions/upload-artifact@v4
+        with:
+          name: mapping
+          path: release-artifacts/mapping-*.txt
+          if-no-files-found: warn
+
+  release:
+    name: Build & Publish Release
+    needs: [host, android]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: release-artifacts
+
+      - name: List artifacts
+        run: ls -la release-artifacts/
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: release-artifacts/*.apk
+          files: release-artifacts/*
           generate_release_notes: true
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

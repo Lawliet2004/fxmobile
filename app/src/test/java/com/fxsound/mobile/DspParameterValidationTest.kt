@@ -21,6 +21,7 @@ class DspParameterValidationTest {
         assertTrue(params.balance in -20.0f..20.0f)
         assertEquals(10, params.eqBandCount)
         assertEquals(10, params.eqGains.size)
+        assertEquals(DspParameters.FLAT, params)
     }
 
     @Test

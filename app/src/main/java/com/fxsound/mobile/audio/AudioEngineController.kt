@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.media.audiofx.AudioEffect
 import android.net.Uri
+import android.util.Log
 import androidx.core.content.ContextCompat
 import com.fxsound.mobile.core.model.AudioTelemetry
 import com.fxsound.mobile.core.model.DspParameters
@@ -19,12 +20,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicLong
 
 class AudioEngineController(
     private val context: Context,
@@ -35,12 +38,24 @@ class AudioEngineController(
     private var telemetryJob: Job? = null
     private var persistJob: Job? = null
 
-    @Volatile private var enginePtr: Long = 0
-    @Volatile private var streamPtr: Long = 0
+    // Use AtomicLong so we can atomically take ownership of the native handle in release()
+    // and during the telemetry snapshot. Plain @Volatile would allow a race where another
+    // thread reads the old (non-zero) pointer just as release() nulls it out.
+    private val enginePtr = AtomicLong(0L)
+    private val streamPtr = AtomicLong(0L)
     @Volatile private var dspBackend: String = "Rust DSP"
     @Volatile private var nativeStarted: Boolean = false
+    @Volatile private var released: Boolean = false
     private var initJob: Job? = null
+    @Volatile private var keepAliveActive: Boolean = false
+    @Volatile private var keepAliveTitle: String? = null
     var onNeedNotificationPermission: (() -> Unit)? = null
+
+    /**
+     * Remembered "was playing" state for restore-after-noisy. Set to the current
+     * `isPlaying` flag in the `onBecomingNoisy` callback; cleared when we resume.
+     */
+    @Volatile private var playingBeforeNoisy: Boolean = false
 
     private val _parameters = MutableStateFlow(DspParameters())
     val parameters: StateFlow<DspParameters> = _parameters.asStateFlow()
@@ -61,16 +76,25 @@ class AudioEngineController(
     private val focusManager = AudioFocusManager(
         context = context,
         onDuck = { ducked ->
-            if (enginePtr != 0L) {
+            withEngine { engine ->
                 val duckGain = if (ducked) -12.0f else _parameters.value.masterGainDb
-                NativeDspBridge.setMasterGainDb(enginePtr, duckGain)
+                NativeDspBridge.setMasterGainDb(engine, duckGain)
             }
         },
         onLoss = { stopPlayback() },
         onGain = {
-            if (enginePtr != 0L) {
-                NativeDspBridge.setMasterGainDb(enginePtr, _parameters.value.masterGainDb)
-            }
+            withEngine { NativeDspBridge.setMasterGainDb(it, _parameters.value.masterGainDb) }
+        },
+        onTransientLoss = { shouldResume ->
+            // Remember the pre-pause playing state so we can auto-resume when focus
+            // comes back (if the output route is still available).
+            playingBeforeNoisy = _telemetry.value.isPlaying
+            pausePlayback()
+            // Expose a hook for the caller to wire resume-on-gain if desired. The
+            // current onGain callback unconditionally restores the master gain, so
+            // we don't auto-call shouldResume() here — the resume is performed by
+            // the device-restore path or by explicit user action.
+            @Suppress("UNUSED_EXPRESSION") shouldResume
         }
     )
 
@@ -81,8 +105,23 @@ class AudioEngineController(
                 activeOutputDevice = deviceName,
                 isBluetooth = isBluetooth
             )
+            // If a wired output reappears (or a non-bluetooth device takes over)
+            // and we had paused on BECOMING_NOISY, try to resume.
+            if (!isBluetooth &&
+                (deviceName.startsWith("Wired") || deviceName.startsWith("USB")) &&
+                playingBeforeNoisy
+            ) {
+                restoreIfNeeded()
+            }
         },
-        onBecomingNoisy = { pausePlayback() }
+        onBecomingNoisy = {
+            // Only mark if we were actually playing - prevents stale state from a
+            // pause that already happened for another reason.
+            if (_telemetry.value.isPlaying) {
+                playingBeforeNoisy = true
+            }
+            pausePlayback()
+        }
     )
 
     private val sessionReceiver = object : BroadcastReceiver() {
@@ -132,13 +171,21 @@ class AudioEngineController(
     }
 
     fun ensureNativeStarted() {
+        if (released) return
         if (nativeStarted) return
         synchronized(this) {
+            if (released) return
             if (nativeStarted || initJob != null) return
             initJob = scope.launch {
                 initializeNativeEngine()
+                synchronized(this@AudioEngineController) {
+                    if (!released && enginePtr.get() != 0L) {
+                        nativeStarted = true
+                    } else {
+                        initJob = null
+                    }
+                }
             }
-            nativeStarted = true
         }
     }
 
@@ -152,22 +199,59 @@ class AudioEngineController(
 
     private fun initializeNativeEngine() {
         try {
+            if (!NativeDspBridge.isAvailable) {
+                setError("Audio processing could not be started.")
+                return
+            }
             dspBackend = try {
                 NativeDspBridge.getDspBackend()
-            } catch (_: Exception) {
+            } catch (t: Throwable) {
+                Log.w(TAG, "getDspBackend failed, using default", t)
                 "Rust DSP"
             }
-            enginePtr = NativeDspBridge.createEngine(48000.0f, 2048)
-            if (enginePtr != 0L) {
-                streamPtr = NativeDspBridge.createAudioStream(enginePtr)
-                if (streamPtr != 0L && DevicePerformance.preferLowPowerIo(context)) {
-                    NativeDspBridge.setAudioStreamLowPowerIo(streamPtr, true)
-                }
-                applyAllParameters(_parameters.value)
-            } else {
-                setError("Audio processing could not be started.")
+            val newEngine = NativeDspBridge.createEngine(48000.0f, 2048)
+            if (released) {
+                if (newEngine != 0L) NativeDspBridge.destroyEngine(newEngine)
+                return
             }
-        } catch (_: Exception) {
+            if (enginePtr.compareAndSet(0L, newEngine)) {
+                if (newEngine != 0L) {
+                    // Do not create a stream against an engine release() already
+                    // destroyed (or is about to destroy). If we still own the
+                    // pointer, take it back and free it ourselves.
+                    if (released) {
+                        val owned = enginePtr.getAndSet(0L)
+                        if (owned != 0L) NativeDspBridge.destroyEngine(owned)
+                        return
+                    }
+                    val newStream = NativeDspBridge.createAudioStream(newEngine)
+                    if (released) {
+                        if (newStream != 0L) NativeDspBridge.destroyAudioStream(newStream)
+                        val owned = enginePtr.getAndSet(0L)
+                        if (owned != 0L) NativeDspBridge.destroyEngine(owned)
+                        return
+                    }
+                    if (streamPtr.compareAndSet(0L, newStream)) {
+                        if (released) {
+                            if (newStream != 0L) NativeDspBridge.destroyAudioStream(newStream)
+                            streamPtr.set(0L)
+                            return
+                        }
+                        if (newStream != 0L && DevicePerformance.preferLowPowerIo(context)) {
+                            NativeDspBridge.setAudioStreamLowPowerIo(newStream, true)
+                        }
+                        applyAllParameters(_parameters.value)
+                    } else if (newStream != 0L) {
+                        NativeDspBridge.destroyAudioStream(newStream)
+                    }
+                } else {
+                    setError("Audio processing could not be started.")
+                }
+            } else if (newEngine != 0L) {
+                NativeDspBridge.destroyEngine(newEngine)
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "Native engine initialization failed", t)
             setError("Audio processing could not be started.")
         }
     }
@@ -175,7 +259,7 @@ class AudioEngineController(
     fun applyInitialState(parameters: DspParameters) {
         val ten = parameters.toTenBand()
         _parameters.value = ten
-        if (enginePtr != 0L) {
+        if (enginePtr.get() != 0L) {
             applyAllParameters(ten)
         }
         syncKeepAlive()
@@ -214,16 +298,33 @@ class AudioEngineController(
         )
         if (keep) {
             val title = when {
-                _telemetry.value.isPlaying && _telemetry.value.sourceType == 4 ->
-                    _telemetry.value.mediaTitle
-                _telemetry.value.processingMode == ProcessingMode.PLAYER_SESSION ->
-                    "Player session"
+                tel.isPlaying && tel.sourceType == 4 -> tel.mediaTitle
+                tel.processingMode == ProcessingMode.PLAYER_SESSION -> "Player session"
                 else -> "Enhancement on"
             }
-            onNeedNotificationPermission?.invoke()
-            AudioPlaybackService.start(context, title)
-        } else {
-            AudioPlaybackService.stop(context)
+            if (keepAliveActive && keepAliveTitle == title) return
+            try {
+                onNeedNotificationPermission?.invoke()
+            } catch (t: Throwable) {
+                Log.w(TAG, "notification permission request failed", t)
+            }
+            try {
+                AudioPlaybackService.start(context, title)
+                keepAliveActive = true
+                keepAliveTitle = title
+            } catch (t: Throwable) {
+                Log.w(TAG, "keep-alive service start failed", t)
+                keepAliveActive = false
+                keepAliveTitle = null
+            }
+        } else if (keepAliveActive) {
+            try {
+                AudioPlaybackService.stop(context)
+            } catch (t: Throwable) {
+                Log.w(TAG, "keep-alive service stop failed", t)
+            }
+            keepAliveActive = false
+            keepAliveTitle = null
         }
     }
 
@@ -231,11 +332,24 @@ class AudioEngineController(
         telemetryJob?.cancel()
         telemetryJob = scope.launch {
             while (isActive) {
+                if (released) break
+
+                // Take a consistent atomic snapshot of the native pointers for this
+                // iteration so we don't race with release().
+                val engine = enginePtr.get()
+                val stream = streamPtr.get()
+
                 val playing = _telemetry.value.isPlaying
                 val needMeters = settingsVisible || (playing && metersVisible)
                 val uiAwake = foregroundVisible || settingsVisible
-                if (enginePtr != 0L && uiAwake && needMeters) {
-                    NativeDspBridge.getMeterData(enginePtr, meterBuffer)
+                if (engine != 0L && uiAwake && needMeters && NativeDspBridge.isAvailable) {
+                    try {
+                        NativeDspBridge.getMeterData(engine, meterBuffer)
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "getMeterData failed", t)
+                        delay(2000L)
+                        continue
+                    }
                     var sr = 48000
                     var ch = 2
                     var buf = 256
@@ -243,14 +357,18 @@ class AudioEngineController(
                     var cpu = 0.0f
                     var isAAudio = true
 
-                    if (streamPtr != 0L) {
-                        NativeDspBridge.getAudioStreamTelemetry(streamPtr, telemetryBuffer)
-                        sr = telemetryBuffer[0].toInt()
-                        ch = telemetryBuffer[1].toInt()
-                        buf = telemetryBuffer[2].toInt()
-                        burst = telemetryBuffer[3].toInt()
-                        cpu = telemetryBuffer[4]
-                        isAAudio = telemetryBuffer[5] > 0.5f
+                    if (stream != 0L && !released) {
+                        try {
+                            NativeDspBridge.getAudioStreamTelemetry(stream, telemetryBuffer)
+                            sr = telemetryBuffer[0].toInt()
+                            ch = telemetryBuffer[1].toInt()
+                            buf = telemetryBuffer[2].toInt()
+                            burst = telemetryBuffer[3].toInt()
+                            cpu = telemetryBuffer[4]
+                            isAAudio = telemetryBuffer[5] > 0.5f
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "getAudioStreamTelemetry failed", t)
+                        }
                     }
 
                     val latencyMs = if (sr > 0) (buf.toFloat() / sr.toFloat()) * 1000.0f else 5.33f
@@ -276,18 +394,26 @@ class AudioEngineController(
                         else -> 2000L
                     }
                 )
+                if (released) break
             }
         }
     }
 
     fun startPlayback(sourceType: Int = 0, frequency: Float = 440.0f) {
+        if (released) return
+        if (!frequency.isFinite()) {
+            Log.w(TAG, "ignored non-finite frequency")
+            return
+        }
         ensureNativeStarted()
-        if (streamPtr == 0L) {
+        val stream = streamPtr.get()
+        if (stream == 0L) {
             val job = initJob
             if (job != null && !job.isCompleted) {
                 scope.launch {
                     job.join()
-                    if (streamPtr != 0L) startPlayback(sourceType, frequency)
+                    if (released) return@launch
+                    if (streamPtr.get() != 0L) startPlayback(sourceType, frequency)
                     else setError("No compatible audio output is available.")
                 }
                 return
@@ -296,13 +422,13 @@ class AudioEngineController(
             return
         }
         stopDecoder()
-        NativeDspBridge.resetPcmRing(streamPtr)
+        NativeDspBridge.resetPcmRing(stream)
         if (!focusManager.requestAudioFocus()) {
             setError("Another application controls this audio route.")
             return
         }
-        NativeDspBridge.setAudioStreamSource(streamPtr, sourceType, frequency)
-        val success = NativeDspBridge.startAudioStream(streamPtr)
+        NativeDspBridge.setAudioStreamSource(stream, sourceType, frequency)
+        val success = NativeDspBridge.startAudioStream(stream)
         if (success) {
             AudioPlaybackService.start(context, if (sourceType == 4) _telemetry.value.mediaTitle else "Test generator")
             _telemetry.value = _telemetry.value.copy(
@@ -318,13 +444,17 @@ class AudioEngineController(
     }
 
     fun openAudioFile(uri: Uri) {
+        if (released) return
         ensureNativeStarted()
-        if (streamPtr == 0L || enginePtr == 0L) {
+        val stream = streamPtr.get()
+        val engine = enginePtr.get()
+        if (stream == 0L || engine == 0L) {
             val job = initJob
             if (job != null && !job.isCompleted) {
                 scope.launch {
                     job.join()
-                    if (streamPtr != 0L && enginePtr != 0L) openAudioFile(uri)
+                    if (released) return@launch
+                    if (streamPtr.get() != 0L && enginePtr.get() != 0L) openAudioFile(uri)
                     else setError("Audio processing could not be started.")
                 }
                 return
@@ -342,26 +472,31 @@ class AudioEngineController(
         settingsRepository.saveLastMediaUri(uri.toString())
         currentMediaUri = uri
         stopDecoder()
-        NativeDspBridge.resetPcmRing(streamPtr)
+        NativeDspBridge.resetPcmRing(stream)
         if (!focusManager.requestAudioFocus()) {
             setError("Another application controls this audio route.")
             return
         }
-        NativeDspBridge.setAudioStreamSource(streamPtr, 4, 440.0f)
-        val started = NativeDspBridge.startAudioStream(streamPtr)
+        NativeDspBridge.setAudioStreamSource(stream, 4, 440.0f)
+        val started = NativeDspBridge.startAudioStream(stream)
         if (!started) {
             focusManager.abandonAudioFocus()
             setError("No compatible audio output is available.")
             return
         }
+        // Sample-rate-aware decoder: prefer the Oboe-actual rate reported in telemetry.
+        // If telemetry hasn't refreshed yet (stream was just started) fall back to 48000.
+        // TODO: once Oboe reports its actual rate synchronously, drop the fallback.
         val sr = _telemetry.value.sampleRate.takeIf { it > 0 } ?: 48000
         decoder = AudioFileDecoder(
             context = context,
             writeFrames = { data, offset, frames ->
-                if (streamPtr == 0L) 0 else NativeDspBridge.writePcmFrames(streamPtr, data, offset, frames)
+                val s = streamPtr.get()
+                if (s == 0L) 0 else NativeDspBridge.writePcmFrames(s, data, offset, frames)
             },
             availableWrite = {
-                if (streamPtr == 0L) 0 else NativeDspBridge.pcmAvailableWrite(streamPtr)
+                val s = streamPtr.get()
+                if (s == 0L) 0 else NativeDspBridge.pcmAvailableWrite(s)
             },
             onProgress = { pos, dur ->
                 _telemetry.value = _telemetry.value.copy(
@@ -400,13 +535,15 @@ class AudioEngineController(
 
     private fun resumeMedia() {
         val uri = currentMediaUri ?: return
-        if (decoder != null && streamPtr != 0L) {
+        if (decoder != null && streamPtr.get() != 0L) {
             if (!focusManager.requestAudioFocus()) {
                 setError("Another application controls this audio route.")
                 return
             }
-            NativeDspBridge.setAudioStreamSource(streamPtr, 4, 440.0f)
-            val started = NativeDspBridge.startAudioStream(streamPtr)
+            val stream = streamPtr.get()
+            if (stream == 0L) return
+            NativeDspBridge.setAudioStreamSource(stream, 4, 440.0f)
+            val started = NativeDspBridge.startAudioStream(stream)
             if (started) {
                 decoder?.resume()
                 _telemetry.value = _telemetry.value.copy(isPlaying = true, lastError = null)
@@ -421,15 +558,17 @@ class AudioEngineController(
 
     fun seekMedia(positionMs: Long) {
         decoder?.seekMs(positionMs)
-        if (streamPtr != 0L) NativeDspBridge.resetPcmRing(streamPtr)
+        val stream = streamPtr.get()
+        if (stream != 0L) NativeDspBridge.resetPcmRing(stream)
         _telemetry.value = _telemetry.value.copy(mediaPositionMs = positionMs)
     }
 
     fun stopPlayback() {
         stopDecoder()
-        if (streamPtr != 0L) {
-            NativeDspBridge.stopAudioStream(streamPtr)
-            NativeDspBridge.resetPcmRing(streamPtr)
+        val stream = streamPtr.get()
+        if (stream != 0L) {
+            NativeDspBridge.stopAudioStream(stream)
+            NativeDspBridge.resetPcmRing(stream)
         }
         focusManager.abandonAudioFocus()
         _telemetry.value = _telemetry.value.copy(isPlaying = false)
@@ -438,8 +577,9 @@ class AudioEngineController(
 
     fun pausePlayback() {
         decoder?.pause()
-        if (streamPtr != 0L) {
-            NativeDspBridge.pauseAudioStream(streamPtr)
+        val stream = streamPtr.get()
+        if (stream != 0L) {
+            NativeDspBridge.pauseAudioStream(stream)
         }
         _telemetry.value = _telemetry.value.copy(isPlaying = false)
         syncKeepAlive()
@@ -447,10 +587,15 @@ class AudioEngineController(
 
     fun setSourceType(sourceType: Int, frequency: Float = 440.0f) {
         if (sourceType == 4) return
+        if (!frequency.isFinite()) {
+            Log.w(TAG, "ignored non-finite frequency")
+            return
+        }
         stopDecoder()
-        if (streamPtr != 0L) {
-            NativeDspBridge.resetPcmRing(streamPtr)
-            NativeDspBridge.setAudioStreamSource(streamPtr, sourceType, frequency)
+        val stream = streamPtr.get()
+        if (stream != 0L) {
+            NativeDspBridge.resetPcmRing(stream)
+            NativeDspBridge.setAudioStreamSource(stream, sourceType, frequency)
         }
         _telemetry.value = _telemetry.value.copy(sourceType = sourceType)
     }
@@ -461,6 +606,8 @@ class AudioEngineController(
     }
 
     private fun restoreLastMedia() {
+        // Intentionally does NOT start playback - it just remembers the URI so the
+        // user can resume via toggleMediaPlayback / openAudioFile.
         val saved = settingsRepository.loadLastMediaUri() ?: return
         val uri = runCatching { Uri.parse(saved) }.getOrNull() ?: return
         currentMediaUri = uri
@@ -476,28 +623,31 @@ class AudioEngineController(
     }
 
     private fun applyAllParameters(params: DspParameters) {
-        if (enginePtr == 0L) return
-        NativeDspBridge.setPowerEnabled(enginePtr, params.powerEnabled)
-        NativeDspBridge.setBass(enginePtr, params.bass)
-        NativeDspBridge.setClarity(enginePtr, params.clarity)
-        NativeDspBridge.setAmbience(enginePtr, params.ambience)
-        NativeDspBridge.setSurround(enginePtr, params.surround)
-        NativeDspBridge.setDynamicBoost(enginePtr, params.dynamicBoost)
-        NativeDspBridge.setVolumeLeveling(enginePtr, params.volumeLeveling)
-        NativeDspBridge.setMasterGainDb(enginePtr, params.masterGainDb)
-        NativeDspBridge.setBalance(enginePtr, params.balance)
-        NativeDspBridge.setEqEnabled(enginePtr, params.eqEnabled)
-        NativeDspBridge.setEqBandCount(enginePtr, params.eqBandCount)
-        val count = params.eqBandCount
-        for (i in 0 until count) {
-            if (i < params.eqFrequencies.size) {
-                NativeDspBridge.setEqBandFrequency(enginePtr, i, params.eqFrequencies[i])
-            }
-            if (i < params.eqQFactors.size) {
-                NativeDspBridge.setEqBandQ(enginePtr, i, params.eqQFactors[i])
-            }
-            if (i < params.eqGains.size) {
-                NativeDspBridge.setEqBandGain(enginePtr, i, params.eqGains[i])
+        // Safe to call before the native engine is up: it just updates _parameters
+        // state. JNI calls are skipped when enginePtr == 0L.
+        withEngine { engine ->
+            NativeDspBridge.setPowerEnabled(engine, params.powerEnabled)
+            NativeDspBridge.setBass(engine, params.bass)
+            NativeDspBridge.setClarity(engine, params.clarity)
+            NativeDspBridge.setAmbience(engine, params.ambience)
+            NativeDspBridge.setSurround(engine, params.surround)
+            NativeDspBridge.setDynamicBoost(engine, params.dynamicBoost)
+            NativeDspBridge.setVolumeLeveling(engine, params.volumeLeveling)
+            NativeDspBridge.setMasterGainDb(engine, params.masterGainDb)
+            NativeDspBridge.setBalance(engine, params.balance)
+            NativeDspBridge.setEqEnabled(engine, params.eqEnabled)
+            NativeDspBridge.setEqBandCount(engine, params.eqBandCount)
+            val count = params.eqBandCount
+            for (i in 0 until count) {
+                if (i < params.eqFrequencies.size) {
+                    NativeDspBridge.setEqBandFrequency(engine, i, params.eqFrequencies[i])
+                }
+                if (i < params.eqQFactors.size) {
+                    NativeDspBridge.setEqBandQ(engine, i, params.eqQFactors[i])
+                }
+                if (i < params.eqGains.size) {
+                    NativeDspBridge.setEqBandGain(engine, i, params.eqGains[i])
+                }
             }
         }
         if (_telemetry.value.processingMode == ProcessingMode.PLAYER_SESSION && sessionEffects.isAttached) {
@@ -524,19 +674,36 @@ class AudioEngineController(
         native: (Long, Float) -> Unit,
         session: Boolean = false
     ) {
+        if (!value.isFinite()) {
+            Log.w(TAG, "ignored non-finite DSP value")
+            return
+        }
         val clamped = value.coerceIn(range.start, range.endInclusive)
         _parameters.value = copy(_parameters.value, clamped)
         persistParams()
-        if (enginePtr != 0L) native(enginePtr, clamped)
+        withEngine { native(it, clamped) }
         if (session && sessionEffects.isAttached) sessionEffects.apply(_parameters.value)
     }
 
     fun setPowerEnabled(enabled: Boolean) {
+        if (released) return
         _parameters.value = _parameters.value.copy(powerEnabled = enabled)
         persistParams()
-        if (enginePtr != 0L) NativeDspBridge.setPowerEnabled(enginePtr, enabled)
+        withEngine { NativeDspBridge.setPowerEnabled(it, enabled) }
         if (sessionEffects.isAttached) sessionEffects.apply(_parameters.value)
         syncKeepAlive()
+    }
+
+    private inline fun withEngine(block: (Long) -> Unit) {
+        if (released) return
+        if (!NativeDspBridge.isAvailable) return
+        val engine = enginePtr.get()
+        if (engine == 0L) return
+        try {
+            block(engine)
+        } catch (t: Throwable) {
+            Log.w(TAG, "native engine call failed", t)
+        }
     }
 
     fun setBass(amount: Float) = setFloat(amount, 0f..10f, { p, v -> p.copy(bass = v) }, NativeDspBridge::setBass, session = true)
@@ -549,43 +716,57 @@ class AudioEngineController(
     fun setBalance(balance: Float) = setFloat(balance, -20f..20f, { p, v -> p.copy(balance = v) }, NativeDspBridge::setBalance)
 
     fun setEqEnabled(enabled: Boolean) {
+        if (released) return
         _parameters.value = _parameters.value.copy(eqEnabled = enabled)
         persistParams()
-        if (enginePtr != 0L) NativeDspBridge.setEqEnabled(enginePtr, enabled)
+        withEngine { NativeDspBridge.setEqEnabled(it, enabled) }
         if (sessionEffects.isAttached) sessionEffects.apply(_parameters.value)
     }
 
     fun setEqBandGain(bandIndex: Int, gainDb: Float) {
+        if (!gainDb.isFinite()) {
+            Log.w(TAG, "ignored non-finite EQ gain")
+            return
+        }
         val currentGains = _parameters.value.eqGains.toMutableList()
         if (bandIndex in currentGains.indices) {
             val clamped = gainDb.coerceIn(-12.0f, 12.0f)
             currentGains[bandIndex] = clamped
             _parameters.value = _parameters.value.copy(eqGains = currentGains)
             persistParams()
-            if (enginePtr != 0L) NativeDspBridge.setEqBandGain(enginePtr, bandIndex, clamped)
+            withEngine { NativeDspBridge.setEqBandGain(it, bandIndex, clamped) }
             if (sessionEffects.isAttached) sessionEffects.apply(_parameters.value)
         }
     }
 
     fun setEqBandFrequency(bandIndex: Int, freq: Float) {
+        if (!freq.isFinite()) {
+            Log.w(TAG, "ignored non-finite EQ frequency")
+            return
+        }
         val freqs = _parameters.value.eqFrequencies.toMutableList()
         if (bandIndex in freqs.indices) {
             val clamped = freq.coerceIn(20.0f, 20000.0f)
             freqs[bandIndex] = clamped
             _parameters.value = _parameters.value.copy(eqFrequencies = freqs)
             persistParams()
-            if (enginePtr != 0L) NativeDspBridge.setEqBandFrequency(enginePtr, bandIndex, clamped)
+            withEngine { NativeDspBridge.setEqBandFrequency(it, bandIndex, clamped) }
+            if (sessionEffects.isAttached) sessionEffects.apply(_parameters.value)
         }
     }
 
     fun setEqBandQ(bandIndex: Int, q: Float) {
+        if (!q.isFinite()) {
+            Log.w(TAG, "ignored non-finite EQ Q")
+            return
+        }
         val qs = _parameters.value.eqQFactors.toMutableList()
         if (bandIndex in qs.indices) {
             val clamped = q.coerceIn(0.7f, 3.0f)
             qs[bandIndex] = clamped
             _parameters.value = _parameters.value.copy(eqQFactors = qs)
             persistParams()
-            if (enginePtr != 0L) NativeDspBridge.setEqBandQ(enginePtr, bandIndex, clamped)
+            withEngine { NativeDspBridge.setEqBandQ(it, bandIndex, clamped) }
         }
     }
 
@@ -609,10 +790,10 @@ class AudioEngineController(
             eqQFactors = qs
         )
         persistParams()
-        if (enginePtr != 0L) {
-            NativeDspBridge.resetAllEqBands(enginePtr)
-            freqs.forEachIndexed { i, f -> NativeDspBridge.setEqBandFrequency(enginePtr, i, f) }
-            qs.forEachIndexed { i, q -> NativeDspBridge.setEqBandQ(enginePtr, i, q) }
+        withEngine { engine ->
+            NativeDspBridge.resetAllEqBands(engine)
+            freqs.forEachIndexed { i, f -> NativeDspBridge.setEqBandFrequency(engine, i, f) }
+            qs.forEachIndexed { i, q -> NativeDspBridge.setEqBandQ(engine, i, q) }
         }
     }
 
@@ -621,9 +802,8 @@ class AudioEngineController(
     }
 
     fun getMagnitudeResponse(frequencies: FloatArray, outDbs: FloatArray) {
-        if (enginePtr != 0L && frequencies.isNotEmpty() && frequencies.size == outDbs.size) {
-            NativeDspBridge.getMagnitudeResponse(enginePtr, frequencies, outDbs, frequencies.size)
-        }
+        if (frequencies.isEmpty() || frequencies.size != outDbs.size) return
+        withEngine { NativeDspBridge.getMagnitudeResponse(it, frequencies, outDbs, frequencies.size) }
     }
 
     fun computeMagnitudeResponse(frequencies: FloatArray): List<Float> {
@@ -637,24 +817,66 @@ class AudioEngineController(
     }
 
     private fun setError(message: String) {
+        Log.w(TAG, "Engine error: $message")
         _telemetry.value = _telemetry.value.copy(lastError = message, isPlaying = false)
     }
 
+    /**
+     * If we previously paused on `BECOMING_NOISY` and a wired output is now connected,
+     * resume the current media source. No-op if we weren't paused-for-noisy or if the
+     * new device is still the built-in speaker / bluetooth.
+     */
+    private fun restoreIfNeeded() {
+        if (!playingBeforeNoisy) return
+        if (!deviceReceiver.hasWiredOutput()) return
+        playingBeforeNoisy = false
+        resumeMedia()
+    }
+
     fun release() {
+        // 1) Flip the released flag FIRST so concurrent async branches and the
+        //    telemetry poll bail out before touching native handles.
+        released = true
+
+        // 2) Persist parameters synchronously so we don't lose writes if the
+        //    process is killed shortly after release.
         persistParams(immediate = true)
+        runCatching { settingsRepository.saveParameters(_parameters.value) }
+
+        // 3) Stop coroutines and decoders.
         telemetryJob?.cancel()
         persistJob?.cancel()
         stopPlayback()
         sessionEffects.detach()
+
+        // 4) Unregister receivers.
         try { context.unregisterReceiver(sessionReceiver) } catch (_: Exception) {}
         deviceReceiver.unregister()
-        if (streamPtr != 0L) {
-            NativeDspBridge.destroyAudioStream(streamPtr)
-            streamPtr = 0
+
+        // 5) Atomically take ownership of the native handles and destroy them.
+        //    compareAndSet(0,0) on already-zero pointers is a no-op; getAndSet
+        //    ensures no other thread can race in a stale non-zero value.
+        val stream = streamPtr.getAndSet(0L)
+        if (stream != 0L) {
+            try { NativeDspBridge.destroyAudioStream(stream) } catch (e: Exception) {
+                Log.w(TAG, "destroyAudioStream failed", e)
+            }
         }
-        if (enginePtr != 0L) {
-            NativeDspBridge.destroyEngine(enginePtr)
-            enginePtr = 0
+        val engine = enginePtr.getAndSet(0L)
+        if (engine != 0L) {
+            try { NativeDspBridge.destroyEngine(engine) } catch (e: Exception) {
+                Log.w(TAG, "destroyEngine failed", e)
+            }
         }
+
+        keepAliveActive = false
+        keepAliveTitle = null
+
+        // 6) Finally cancel the scope so no further coroutines launch.
+        scope.cancel()
+    }
+
+    companion object {
+        private const val TAG = "FxEngine"
     }
 }

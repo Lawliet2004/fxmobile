@@ -18,6 +18,14 @@ class AudioDeviceReceiver(
     private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private var isRegistered = false
 
+    /**
+     * The last reported output device. Public so [AudioEngineController] can check whether a
+     * wired device is currently connected when it wants to restore playback after a
+     * `BECOMING_NOISY` pause.
+     */
+    @Volatile var activeOutputDevice: String = "Built-in Speaker"
+        private set
+
     private val broadcastReceiver = object : BroadcastReceiver() {
         override fun onReceive(ctx: Context?, intent: Intent?) {
             if (intent?.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
@@ -42,13 +50,35 @@ class AudioDeviceReceiver(
     fun register() {
         if (isRegistered) return
 
-        val filter = IntentFilter().apply {
+        // System-side broadcasts from the audio framework (headset plug and the
+        // protected "becoming noisy" signal) are delivered even to non-exported
+        // receivers, but we keep the noisy one exported to match historical
+        // behaviour and to be explicit about it being a system-only stream.
+        val systemFilter = IntentFilter().apply {
             addAction(AudioManager.ACTION_HEADSET_PLUG)
             addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+        }
+        ContextCompat.registerReceiver(
+            context,
+            broadcastReceiver,
+            systemFilter,
+            ContextCompat.RECEIVER_EXPORTED
+        )
+
+        // Bluetooth profile connection events come from another UID. Modern
+        // Android still allows them to be delivered to a non-exported receiver
+        // because they are protected broadcasts, and we want the tightest
+        // possible surface for arbitrary in-process broadcasts.
+        val bluetoothFilter = IntentFilter().apply {
             addAction("android.bluetooth.headset.profile.action.CONNECTION_STATE_CHANGED")
             addAction("android.bluetooth.a2dp.profile.action.CONNECTION_STATE_CHANGED")
         }
-        ContextCompat.registerReceiver(context, broadcastReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+        ContextCompat.registerReceiver(
+            context,
+            broadcastReceiver,
+            bluetoothFilter,
+            ContextCompat.RECEIVER_NOT_EXPORTED
+        )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && deviceCallback != null) {
             audioManager.registerAudioDeviceCallback(deviceCallback, null)
@@ -61,15 +91,27 @@ class AudioDeviceReceiver(
     fun unregister() {
         if (!isRegistered) return
 
-        try {
-            context.unregisterReceiver(broadcastReceiver)
-        } catch (_: Exception) {}
+        // The same receiver instance is registered twice (once for the system
+        // stream, once for the BT profile stream), so unregister it twice to
+        // fully detach.
+        try { context.unregisterReceiver(broadcastReceiver) } catch (_: Exception) {}
+        try { context.unregisterReceiver(broadcastReceiver) } catch (_: Exception) {}
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && deviceCallback != null) {
             audioManager.unregisterAudioDeviceCallback(deviceCallback)
         }
 
         isRegistered = false
+    }
+
+    /**
+     * Returns true if a wired audio output (3.5mm headphones or USB DAC) is currently connected.
+     * Used to decide whether playback should be auto-resumed after a transient `BECOMING_NOISY`
+     * pause.
+     */
+    fun hasWiredOutput(): Boolean {
+        val name = activeOutputDevice
+        return name.startsWith("Wired") || name.startsWith("USB")
     }
 
     fun updateCurrentDevice() {
@@ -103,6 +145,7 @@ class AudioDeviceReceiver(
             }
         }
 
+        activeOutputDevice = deviceName
         onDeviceChanged(deviceName, isBluetooth)
     }
 }

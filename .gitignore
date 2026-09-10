@@ -20,6 +20,8 @@ app/.cxx/
 local.properties
 .env
 .env.*.local
+signing.properties
+*.bak
 
 # ==============================================================================
 # IDE & Editor files
@@ -27,6 +29,7 @@ local.properties
 *.iml
 .idea/
 .vscode/
+.commandcode/
 *.ipr
 *.iws
 *.swp

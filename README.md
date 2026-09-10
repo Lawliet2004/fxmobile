@@ -4,6 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/Lawliet2004/fxmobile?label=Release&color=blue)](https://github.com/Lawliet2004/fxmobile/releases)
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Platform](https://img.shields.io/badge/Platform-Android%208.0%2B%20(API%2026%2B)-brightgreen.svg)](https://developer.android.com/about/versions/oreo)
+[![Host CLI](https://img.shields.io/badge/Host%20CLI-Windows%20%7C%20macOS%20%7C%20Linux-informational.svg)](https://github.com/Lawliet2004/fxmobile/releases)
 [![Footprint](https://img.shields.io/badge/Release%20APK-3.72%20MB%20(arm64)-success.svg)](install/)
 
 **FxMobile** is a high-fidelity native Android audio enhancement application inspired by the open-source **FxSound** desktop project ([fxsound2/fxsound-app](https://github.com/fxsound2/fxsound-app)).
@@ -19,9 +20,13 @@ Built from the ground up for extreme performance, zero-latency DSP, offline priv
 
 ---
 
-## 📦 Releases & APK Installers
+## 📦 Releases & Downloads
 
-Pre-built APK installers are maintained directly in the repository under [`install/`](install/) and published to [GitHub Releases](https://github.com/Lawliet2004/fxmobile/releases).
+**Android GUI is Android-only** (Jetpack Compose + Oboe). It cannot run on Windows, macOS, or Linux. Desktop downloads are the **shared Rust DSP engine CLI** (`fxengine`), not a Compose Multiplatform port.
+
+Pre-built Android APKs live under [`install/`](install/) and on [GitHub Releases](https://github.com/Lawliet2004/fxmobile/releases). Host CLIs for Windows, macOS, and Linux are attached to the same GitHub Releases next to the APKs.
+
+### Android APK (GUI)
 
 | Version Tag | Release Status | Target Architecture | APK Installer Package | Size | Notes |
 |:---|:---|:---|:---|:---|:---|
@@ -33,6 +38,26 @@ Pre-built APK installers are maintained directly in the repository under [`insta
 2. Open the downloaded `.apk` file on your Android device (Android 8.0 Oreo / API 26 or newer).
 3. If prompted, enable **"Install unknown apps"** or **"Allow from this source"** in your device settings.
 4. Complete the installation and launch **FxMobile**.
+
+### Desktop host CLI (Windows / macOS / Linux)
+
+Download the binary for your OS from the [latest GitHub Release](https://github.com/Lawliet2004/fxmobile/releases/latest):
+
+| Platform | Artifact |
+|:---|:---|
+| Windows x64 | [`fxengine-windows-x64.exe`](https://github.com/Lawliet2004/fxmobile/releases/latest/download/fxengine-windows-x64.exe) |
+| macOS x64 | [`fxengine-macos-x64`](https://github.com/Lawliet2004/fxmobile/releases/latest/download/fxengine-macos-x64) |
+| Linux x64 | [`fxengine-linux-x64`](https://github.com/Lawliet2004/fxmobile/releases/latest/download/fxengine-linux-x64) |
+
+```bash
+# usage (no args, --help, or -h) — version, platforms, smoke flag
+./fxengine --help
+
+# real Engine smoke: 128-frame stereo sine through process_interleaved
+./fxengine --smoke
+```
+
+On Windows, run `fxengine-windows-x64.exe --help` and `fxengine-windows-x64.exe --smoke`. On Unix, `chmod +x` the downloaded file first. See [`install/README.md`](install/README.md) for full host-enhancer notes.
 
 ---
 
@@ -120,6 +145,9 @@ cd fxmobile
 
 # Rust DSP tests (host)
 cargo test --manifest-path native/fxengine/Cargo.toml
+
+# Host CLI (Windows / macOS / Linux) — same engine as the APK
+cargo build --release --bin fxengine --manifest-path native/fxengine/Cargo.toml
 
 # Run Android Unit Tests
 ./gradlew test

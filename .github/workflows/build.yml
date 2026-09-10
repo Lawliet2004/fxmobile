@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [ main, master ]
 
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,6 +23,7 @@ jobs:
         with:
           distribution: 'temurin'
           java-version: '17'
+          cache: 'gradle'
 
       - name: Set up Android SDK & NDK
         uses: android-actions/setup-android@v3
@@ -28,6 +33,11 @@ jobs:
       - name: Install NDK & CMake
         run: |
           sdkmanager --install "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/fxengine -> target
 
       - name: Install Rust (host + Android targets)
         uses: dtolnay/rust-toolchain@stable
@@ -53,3 +63,79 @@ jobs:
         run: |
           echo "=== APK SIZE REPORT ==="
           ls -lh app/build/outputs/apk/release/
+
+  lint:
+    name: Rust Lint (clippy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/fxengine -> target
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run cargo clippy
+        run: cargo clippy --manifest-path native/fxengine/Cargo.toml --all-targets -- -D warnings
+
+  host:
+    name: Host CLI (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            artifact: fxengine-linux-x64
+            bin: fxengine
+          - os: windows-latest
+            artifact: fxengine-windows-x64.exe
+            bin: fxengine.exe
+          - os: macos-latest
+            artifact: fxengine-macos-x64
+            bin: fxengine
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/fxengine -> target
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Test fxengine
+        run: cargo test --manifest-path native/fxengine/Cargo.toml
+
+      - name: Build host CLI
+        run: cargo build --release --bin fxengine --manifest-path native/fxengine/Cargo.toml
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p dist
+          src="native/fxengine/target/release/${{ matrix.bin }}"
+          dst="dist/${{ matrix.bin }}"
+          cp "$src" "$dst"
+          chmod +x "$dst"
+          ls -lh "$dst"
+          ./"$dst" --help
+          ./"$dst" --version
+          ./"$dst" --smoke
+
+      - name: Upload host binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.bin }}
+          if-no-files-found: error
+

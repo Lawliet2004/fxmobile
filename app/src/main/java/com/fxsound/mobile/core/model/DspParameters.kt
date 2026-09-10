@@ -5,19 +5,19 @@ import org.json.JSONObject
 
 data class DspParameters(
     val powerEnabled: Boolean = true,
-    val bass: Float = 3.5f,
-    val clarity: Float = 3.0f,
-    val ambience: Float = 2.0f,
-    val surround: Float = 1.5f,
-    val dynamicBoost: Float = 2.0f,
-    val volumeLeveling: Float = 1.0f,
+    val bass: Float = 0.0f,
+    val clarity: Float = 0.0f,
+    val ambience: Float = 0.0f,
+    val surround: Float = 0.0f,
+    val dynamicBoost: Float = 0.0f,
+    val volumeLeveling: Float = 0.0f,
     val masterGainDb: Float = 0.0f,
     val balance: Float = 0.0f,
     val eqEnabled: Boolean = true,
     val eqBandCount: Int = 10,
-    val eqGains: List<Float> = listOf(2.0f, 1.5f, 0.5f, 0.0f, 0.0f, 0.5f, 1.0f, 2.0f, 2.5f, 3.0f),
-    val eqFrequencies: List<Float> = listOf(31.25f, 62.5f, 125f, 250f, 500f, 1000f, 2000f, 4000f, 8000f, 16000f),
-    val eqQFactors: List<Float> = List(10) { 1.414f }
+    val eqGains: List<Float> = List(10) { 0.0f },
+    val eqFrequencies: List<Float> = EqBandTables.TEN,
+    val eqQFactors: List<Float> = EqBandTables.qFactors()
 ) {
     fun toTenBand(): DspParameters {
         if (eqBandCount == EqBandTables.COUNT && eqGains.size == EqBandTables.COUNT &&
@@ -54,22 +54,7 @@ data class DspParameters(
     }
 
     companion object {
-        val FLAT = DspParameters(
-            powerEnabled = true,
-            bass = 0.0f,
-            clarity = 0.0f,
-            ambience = 0.0f,
-            surround = 0.0f,
-            dynamicBoost = 0.0f,
-            volumeLeveling = 0.0f,
-            masterGainDb = 0.0f,
-            balance = 0.0f,
-            eqEnabled = true,
-            eqBandCount = 10,
-            eqGains = List(10) { 0.0f },
-            eqFrequencies = EqBandTables.frequencies(10),
-            eqQFactors = EqBandTables.qFactors(10)
-        )
+        val FLAT = DspParameters()
 
         fun fromJsonObject(paramsObj: JSONObject): DspParameters {
             val eqBandCount = paramsObj.optInt("eqBandCount", 10)

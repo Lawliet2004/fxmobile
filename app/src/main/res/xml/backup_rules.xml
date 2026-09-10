@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Pre-Android 12 backup rules. FxMobile does not back up any of its
+  private data: user presets may contain personally-tuned parameters,
+  and the "last media URI" may leak a recently-played file path.
+-->
+<full-backup-content>
+    <exclude domain="sharedpref" path="fxsound_presets.xml" />
+    <exclude domain="sharedpref" path="fxsound_settings.xml" />
+</full-backup-content>

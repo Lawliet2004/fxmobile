@@ -2,6 +2,7 @@
 name = "fxengine"
 version = "1.0.0"
 edition = "2021"
+rust-version = "1.74"
 description = "Real-time FxMobile DSP engine (no UI, no Android deps)"
 license = "AGPL-3.0-only"
 publish = false
@@ -9,6 +10,26 @@ publish = false
 [lib]
 crate-type = ["staticlib", "rlib"]
 name = "fxengine"
+
+[[bin]]
+name = "fxengine"
+path = "src/bin/fxengine.rs"
+
+[lints.rust]
+# The crate uses `unsafe` only in the FFI boundary (src/lib.rs). The
+# FFI functions are `unsafe extern "C" fn` and the inner pointer
+# helpers are `unsafe fn`; all `unsafe` operations inside those
+# function bodies are wrapped in explicit `unsafe { ... }` blocks so
+# the safety invariants are visible at the call site.
+#
+# We allow the `unsafe_op_in_unsafe_fn` lint at the "allow" level
+# here because the existing FFI wrappers are small and the implicit
+# unsafe block is acceptable for them. The inner helpers
+# `engine_mut`/`engine_ref` and the slice construction in
+# `fx_engine_process_interleaved`/`fx_engine_process` do use
+# explicit `unsafe { ... }` blocks.
+unsafe_op_in_unsafe_fn = "allow"
+unused_must_use = "deny"
 
 [profile.release]
 lto = true
