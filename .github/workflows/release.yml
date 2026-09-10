@@ -58,7 +58,7 @@ jobs:
           ./"$dst" --smoke
 
       - name: Upload host binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
@@ -127,21 +127,21 @@ jobs:
           ls -la release-artifacts/
 
       - name: Upload APKs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: apk
           path: release-artifacts/*.apk
           if-no-files-found: error
 
       - name: Upload AAB
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: aab
           path: release-artifacts/*.aab
           if-no-files-found: warn
 
       - name: Upload R8 mapping
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mapping
           path: release-artifacts/mapping-*.txt
